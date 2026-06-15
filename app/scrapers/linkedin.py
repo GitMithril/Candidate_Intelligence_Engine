@@ -147,16 +147,23 @@ async def _navigate_profile(page: Page, url: str) -> None:
 
 
 async def _scroll_sections(page: Page) -> None:
-    """Scroll the full page to trigger lazy-loading of profile sections."""
-    for _ in range(10):
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
-        await page.wait_for_timeout(500)
-    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await page.wait_for_timeout(1500)
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
+    """
+    Scroll to the true bottom of the page by repeating scroll-to-bottom until
+    the page height stops growing. LinkedIn lazy-loads sections (experience,
+    education, skills) as you scroll, so a single scrollTo(scrollHeight) call
+    lands at the bottom of the *currently rendered* page, not the final bottom.
+    """
+    prev_height = 0
+    for _ in range(20):
+        height: int = await page.evaluate("""() => {
+            window.scrollTo(0, document.body.scrollHeight);
+            return document.body.scrollHeight;
+        }""")
+        await page.wait_for_timeout(800)
+        if height == prev_height:
+            break
+        prev_height = height
+    await page.wait_for_timeout(1000)
 
 
 # ── JSON-LD (top-card fast path) ───────────────────────────────────────────────
@@ -257,11 +264,12 @@ async def _top_card(
 
         const SKIP_CTA = /^(Connect|Follow|Message|More|Open|Try|Get|Share|Post|Like|View|Save|Add|Skip)\\b/i;
         const SKIP_META = /\\bfollowers?\\b|\\bconnections?\\b|\\bcontact\\b/i;
+        const SKIP_DEGREE = /^·\\s*(1st|2nd|3rd|\\d+\\+?)\\s*$/;
 
         function filterTexts(arr, nameTxt) {
             const seen = new Set();
             return arr
-                .filter(t => t && t !== nameTxt && t.length > 3 && !SKIP_CTA.test(t) && !SKIP_META.test(t))
+                .filter(t => t && t !== nameTxt && t.length > 3 && !SKIP_CTA.test(t) && !SKIP_META.test(t) && !SKIP_DEGREE.test(t))
                 .filter(t => !seen.has(t) && seen.add(t));
         }
 
@@ -519,6 +527,66 @@ async def _diagnostic(page: Page) -> str:
     return f"sections empty — DOM diagnostic: {json.dumps(d, ensure_ascii=False)}"
 
 
+# ── Skills extraction ─────────────────────────────────────────────────────────
+
+async def _scrape_skills_page(page: Page, profile_url: str) -> list[str]:
+    """
+    Navigate to /in/<slug>/details/skills/, scroll with mouse wheel to trigger
+    LinkedIn's IntersectionObserver lazy loading, then extract all skill names.
+    """
+    m = re.search(r'linkedin\.com/in/([^/?#]+)', profile_url)
+    if not m:
+        return []
+    slug = m.group(1).strip('/')
+    skills_url = f"https://www.linkedin.com/in/{slug}/details/skills/"
+
+    await page.goto(skills_url, wait_until="load", timeout=60000)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(2000)
+
+    # mouse.wheel fires real scroll events that trigger LinkedIn's lazy loading.
+    # window.scrollTo does NOT fire scroll events so IntersectionObserver never
+    # fires and content never loads — that was the root cause of blank skills.
+    await page.mouse.move(640, 400)
+    for _ in range(20):
+        await page.mouse.wheel(0, 600)
+        await page.wait_for_timeout(300)
+    await page.wait_for_timeout(1500)
+
+    return await page.evaluate("""() => {
+        // Skills are plain text inside <span> inside <p>, deeply nested in
+        // hashed-class divs. No class names or aria attributes can be relied on.
+        // We target <p> elements in <main>, exclude nav/header/tab containers,
+        // and filter out known noise strings.
+        // Matches LinkedIn ad-feedback UI strings and footer boilerplate.
+        // Uses . instead of ['’]? to handle both straight and curly apostrophes.
+        const NOISE = /^(Endorsed|See credential|Top skill|\\d+\\s*endorsement|Add a skill|Skills?\\s*(\\(|$)|Why am I seeing|Manage your ad|Hide or report|I don.t want to see this ad|Tell us why you don.t|Your feedback will help|It.s annoying or not|I.ve seen the same ad|If you think this goes|goes against our|Professional Community|LinkedIn Corporation|Visit our Help|Manage your account|Go to your Settings|Recommendation transparency|Learn more about|Select language|Questions|\\?)/i;
+
+        function clean(t) { return (t || '').replace(/\\s+/g, ' ').trim(); }
+        function inNav(el) {
+            return !!el.closest('header, nav, footer, [role="navigation"], [role="tablist"], [role="tab"], [role="dialog"]');
+        }
+        // Skill proofs are formatted as "Role at Company" or "Degree at University".
+        // Real skill names never contain " at <Capital Letter>".
+        function isProof(t) { return /\\bat\\s+[A-Z]/.test(t) || /\\b(University|School|College)\\b/i.test(t); }
+
+        const main = document.querySelector('main') || document.body;
+        const seen = new Set();
+
+        return Array.from(main.querySelectorAll('p'))
+            .filter(p => !inNav(p))
+            .map(p => clean(p.textContent))
+            .filter(t => t && t.length > 1 && t.length < 100
+                      && !/^\\d+$/.test(t)
+                      && !NOISE.test(t)
+                      && !isProof(t)
+                      && !seen.has(t) && seen.add(t));
+    }""")
+
+
 # ── Orchestration ──────────────────────────────────────────────────────────────
 
 async def _scrape(profile_url: str) -> LinkedInProfile:
@@ -557,9 +625,13 @@ async def _scrape(profile_url: str) -> LinkedInProfile:
             edu: list[EducationEntry] = []
             sk: list[str] = []
             try:
-                exp, edu, sk = await _extract_sections(page)
+                exp, edu, _ = await _extract_sections(page)
             except Exception as e:
                 warnings.append(f"sections: {e}")
+            try:
+                sk = await _scrape_skills_page(page, profile_url)
+            except Exception as e:
+                warnings.append(f"skills: {e}")
 
             if not exp and not edu and not sk:
                 warnings.append(await _diagnostic(page))
@@ -597,4 +669,4 @@ def scrape_linkedin(profile_url: str) -> LinkedInProfile:
 if __name__ == "__main__":
     url = sys.argv[1] if len(sys.argv) > 1 else f"{_BASE}/in/williamhgates"
     result = scrape_linkedin(url)
-    print(json.dumps(result.model_dump(), indent=2))
+    print(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
