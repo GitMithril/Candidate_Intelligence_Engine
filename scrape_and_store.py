@@ -65,9 +65,18 @@ def main():
 
     if r.status_code == 201:
         doc = r.json()
-        print(f"Stored — id: {doc['id']}, name: {doc.get('name')}")
+        profile_id = doc["id"]
+        print(f"Stored — id: {profile_id}, name: {doc.get('name')}")
     else:
         print(f"API error {r.status_code}: {r.text}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Embedding profile {profile_id} in Pinecone ...")
+    re = requests.post(f"{args.api}/profiles/{profile_id}/embed", timeout=60)
+    if re.status_code == 200:
+        print("Embedded.")
+    else:
+        print(f"Embed error {re.status_code}: {re.text}", file=sys.stderr)
         sys.exit(1)
 
 
