@@ -2,7 +2,7 @@
 
 A backend system that aggregates professional data from GitHub and LinkedIn, builds unified candidate profiles, generates semantic vector embeddings, and exposes a search API that ranks candidates by relevance to a plain-English query.
 
-**Built for:** Salik Labs Remote Internship — Week 1 Project  
+**Built for:** Salik Labs Remote Internship - Week 1 Project  
 **Live API:** `https://candidateintelligenceengine-production.up.railway.app`  
 **API Docs:** `https://candidateintelligenceengine-production.up.railway.app/docs`
 
@@ -301,7 +301,7 @@ All queries below were run against a dataset of real scraped profiles.
 
 ---
 
-### Query 1 — Location + Skill Filter
+### Query 1: Location + Skill Filter
 
 Find candidates from NUST Islamabad with Applied Machine Learning experience.
 
@@ -316,7 +316,7 @@ GET /search?q=NUST%2C%20Islamabad&skills=Applied%20Machine%20Learning&k=3
 
 ---
 
-### Query 2 — Semantic Role Match
+### Query 2: Semantic Role Match
 
 Find candidates who fit a Product Developer profile.
 
@@ -332,11 +332,11 @@ GET /search?q=Product%20Developer&k=3
 |---|---|---|---|
 | 1 | Faizan Anwar | 0.51 | Headline: *Product Developer @ Particula Tech* |
 | 2 | Muhammad Riyan Aslam | 0.43 | Current role: *Lead Product Engineer* |
-| 3 | Abdullah Ejaz | — | No product-related information in embedded metadata |
+| 3 | Abdullah Ejaz | 0.41 | No product-related information in embedded metadata |
 
 ---
 
-### Query 3 — Multi-filter: Role + Skill + Location
+### Query 3: Multi-filter: Role + Skill + Location
 
 Find Full Stack Developers in Islamabad who know FastAPI.
 
@@ -391,6 +391,6 @@ python scrape_and_store.py --github <username> --linkedin <url> --api https://yo
 
 LinkedIn's bot protection sometimes would block access from a headless browser so i landed on using the browser headful to avoid any problems at all, This was just a start. The deeper problem was LinkedIn's DOM structure: class names are dynamically hashed on every page load, sections are lazy-loaded via IntersectionObserver (meaning a single `scrollTo` call lands at the bottom of the currently-rendered page, not the final one), and deeply nested divs make any CSS-selector-based approach brittle.
 
-Skills were the worst offender. The skills section sits at the very bottom of the profile page and wouldn't render until scrolled to — but even after scrolling, the skills array kept coming back empty. The fix was to navigate to LinkedIn's dedicated `/details/skills/` sub-page instead, scroll it incrementally using `page.mouse.wheel` (which fires the scroll events LinkedIn's IntersectionObserver actually listens to, unlike `window.scrollTo`), and extract text from `<p>` tags directly since class names couldn't be relied upon.
+Skills were the worst offender. The skills section sits at the very bottom of the profile page and wouldn't render until scrolled to but even after scrolling, the skills array kept coming back empty. The fix was to navigate to LinkedIn's dedicated `/details/skills/` sub-page instead, scroll it incrementally using `page.mouse.wheel` (which fires the scroll events LinkedIn's IntersectionObserver actually listens to, unlike `window.scrollTo`), and extract text from `<p>` tags directly since class names couldn't be relied upon.
 
-That still left noise in the output — navbar items, ad feedback strings, and skill proof entries (e.g. "Software Intern at Mezino Technologies" appearing alongside the actual skill name) all came through in the raw extraction. Each required its own filter: a NOISE regex for UI boilerplate and ad copy, an "at Company" pattern for proof entries, and keyword filters for institution names bleeding in from education data.
+That still left noise in the output like navbar items, ad feedback strings, and skill proof entries (e.g. "Software Intern at Mezino Technologies" appearing alongside the actual skill name) all came through in the raw extraction. Each required its own filter: a NOISE regex for UI boilerplate and ad copy, an "at Company" pattern for proof entries, and keyword filters for institution names bleeding in from education data.
