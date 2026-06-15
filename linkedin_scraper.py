@@ -255,29 +255,48 @@ async def _top_card(
                 : null;
         }
 
+        const SKIP_CTA = /^(Connect|Follow|Message|More|Open|Try|Get|Share|Post|Like|View|Save|Add|Skip)\\b/i;
+        const SKIP_META = /\\bfollowers?\\b|\\bconnections?\\b|\\bcontact\\b/i;
+
+        function filterTexts(arr, nameTxt) {
+            const seen = new Set();
+            return arr
+                .filter(t => t && t !== nameTxt && t.length > 3 && !SKIP_CTA.test(t) && !SKIP_META.test(t))
+                .filter(t => !seen.has(t) && seen.add(t));
+        }
+
         let headline = null, location = null;
         if (nameEl) {
-            // Climb until we have a card with at least 4 aria-hidden spans
-            // (name + headline + location + at least one more).
-            let card = nameEl.parentElement;
-            for (let i = 0; i < 10; i++) {
-                if (!card || card === document.body) break;
-                if (card.querySelectorAll('span[aria-hidden="true"]').length >= 4) break;
-                card = card.parentElement;
-            }
-            if (card) {
-                const nameTxt = txt(nameEl) || '';
-                // Filter out: the name itself, very short strings, button-like text,
-                // and CTA phrases (e.g. "View my newsletter", "Connect", "Follow").
-                const blocks = Array.from(card.querySelectorAll('span[aria-hidden="true"]'))
-                    .map(el => el.textContent.replace(/\\s+/g, ' ').trim())
-                    .filter(t => t && t !== nameTxt && t.length > 3
-                              && !t.match(/^(Connect|Follow|Message|More|Open|Try|Get|Share|Post|Like)\\b/i)
-                              && !t.match(/\\bfollowers?\\b|\\bconnections?\\b/i));
-                const seen = new Set();
-                const unique = blocks.filter(t => !seen.has(t) && seen.add(t));
-                headline = unique[0] || null;
-                location = unique[1] || null;
+            const nameTxt = (nameEl.textContent || '').replace(/\\s+/g, ' ').trim();
+
+            // Anchor to the nearest <section> ancestor (LinkedIn wraps the top card
+            // in a section). Fall back to a shallow 5-level climb so we never escape
+            // the top card area into the nav bar.
+            const topCard = nameEl.closest('section') || (() => {
+                let el = nameEl.parentElement;
+                for (let i = 0; i < 5; i++) {
+                    if (!el || el === document.body) break;
+                    el = el.parentElement;
+                }
+                return (el && el !== document.body) ? el : nameEl.parentElement;
+            })();
+
+            if (topCard) {
+                // Primary: aria-hidden spans (LinkedIn's standard text pattern)
+                const spanTexts = Array.from(topCard.querySelectorAll('span[aria-hidden="true"]'))
+                    .map(s => s.textContent.replace(/\\s+/g, ' ').trim());
+                const filtered = filterTexts(spanTexts, nameTxt);
+                if (filtered.length > 0) {
+                    headline = filtered[0];
+                    location = filtered[1] || null;
+                } else {
+                    // Fallback: parse innerText (handles layouts without aria-hidden spans)
+                    const lines = (topCard.innerText || '').split('\\n')
+                        .map(s => s.replace(/\\s+/g, ' ').trim());
+                    const filteredLines = filterTexts(lines, nameTxt);
+                    headline = filteredLines[0] || null;
+                    location = filteredLines[1] || null;
+                }
             }
         }
 

@@ -1,6 +1,9 @@
 # Ignore Python cache files
 __pycache__/
 
+# Archive files
+archive/
+
 # Ignore files related to Claude
 CLAUDE.md
 .claudeignore
