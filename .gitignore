@@ -9,6 +9,7 @@ CLAUDE.md
 .claudeignore
 .claude/
 AGENTS.md
+Instructions.md
 
 # Ignore environment variable files
 .env
