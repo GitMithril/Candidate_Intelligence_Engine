@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient, ReturnDocument
 
+from .embeddings import embed_profile_by_id
 from .schemas import (
     CandidateProfile,
     GitHubProfile,
@@ -145,3 +146,27 @@ def get_profile(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found.")
 
     return _serialize(doc)
+
+
+@app.post(
+    "/profiles/{profile_id}/embed",
+    summary="Generate and store a vector embedding for a profile",
+    response_description="Confirmation that the embedding was stored in Pinecone.",
+)
+def embed_profile(profile_id: str):
+    """
+    Embed the candidate profile identified by `profile_id` using
+    all-MiniLM-L6-v2 and upsert the 384-dim vector to Pinecone.
+    Returns 400 for a malformed id and 404 if no profile is found.
+    """
+    try:
+        ObjectId(profile_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid profile id format — expected a 24-character hex ObjectId.")
+
+    try:
+        embed_profile_by_id(profile_id, _db())
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    return {"id": profile_id, "embedded": True}
