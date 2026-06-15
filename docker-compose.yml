@@ -23,6 +23,8 @@ services:
     depends_on:
       - mongodb
       - redis
+    env_file:
+      - .env
     environment:
       MONGODB_URI: mongodb://mongodb:27017/candidate_intelligence
       REDIS_URL: redis://redis:6379

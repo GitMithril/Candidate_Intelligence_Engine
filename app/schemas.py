@@ -188,3 +188,14 @@ class ProfileCreateRequest(BaseModel):
 
 class ProfileResponse(CandidateProfile):
     id: str
+
+
+class SearchResult(BaseModel):
+    score: float
+    profile: ProfileResponse
+
+
+class SearchResponse(BaseModel):
+    query: str
+    results: list[SearchResult]
+    cached: bool

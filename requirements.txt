@@ -7,3 +7,5 @@ uvicorn[standard]>=0.29
 pymongo>=4.7
 sentence-transformers>=2.7
 pinecone>=5.0  # install as: pip install pinecone (not pinecone-client)
+upstash-redis>=1.0
+redis>=4.0

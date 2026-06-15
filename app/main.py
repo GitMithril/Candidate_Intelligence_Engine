@@ -8,6 +8,7 @@ GET  /profiles/{id}   Fetch a single profile by MongoDB ObjectId.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,16 +16,18 @@ from typing import Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pymongo import MongoClient, ReturnDocument
 
-from .embeddings import embed_profile_by_id
+from .embeddings import embed_profile_by_id, embed_text, query_similar
 from .schemas import (
     CandidateProfile,
     GitHubProfile,
     LinkedInProfile,
     ProfileCreateRequest,
     ProfileResponse,
+    SearchResponse,
+    SearchResult,
     SourceUrls,
 )
 
@@ -37,6 +40,28 @@ app = FastAPI(
 )
 
 _client: Optional[MongoClient] = None
+_REDIS_UNSET = object()
+_redis_client = _REDIS_UNSET
+
+
+class _RedisAdapter:
+    """Normalises upstash-redis and redis-py behind a single get/set interface.
+
+    upstash-redis returns str | None; redis-py returns bytes | None.
+    Both support set(key, value, ex=seconds).
+    """
+    def __init__(self, client, decode: bool = False):
+        self._c = client
+        self._decode = decode
+
+    def get(self, key: str) -> Optional[str]:
+        val = self._c.get(key)
+        if val is None:
+            return None
+        return val.decode() if self._decode else val
+
+    def set(self, key: str, value: str, ex: int = 300) -> None:
+        self._c.set(key, value, ex=ex)
 
 
 def _db():
@@ -45,6 +70,31 @@ def _db():
         uri = os.environ.get("MONGODB_URI", "mongodb://localhost:27017/candidate_intelligence")
         _client = MongoClient(uri)
     return _client["candidate_intelligence"]
+
+
+def _redis() -> Optional[_RedisAdapter]:
+    """Return a Redis adapter.
+
+    Priority:
+      1. UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN  (cloud / production)
+      2. REDIS_URL (e.g. redis://localhost:6379)             (local Docker)
+      3. None — caching disabled, search still works
+    """
+    global _redis_client
+    if _redis_client is _REDIS_UNSET:
+        upstash_url = os.environ.get("UPSTASH_REDIS_REST_URL")
+        upstash_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+        redis_url = os.environ.get("REDIS_URL")
+
+        if upstash_url and upstash_token:
+            from upstash_redis import Redis as UpstashRedis
+            _redis_client = _RedisAdapter(UpstashRedis(url=upstash_url, token=upstash_token), decode=False)
+        elif redis_url:
+            import redis as redis_py
+            _redis_client = _RedisAdapter(redis_py.from_url(redis_url), decode=True)
+        else:
+            _redis_client = None
+    return _redis_client
 
 
 def _merge(req: ProfileCreateRequest) -> CandidateProfile:
@@ -170,3 +220,66 @@ def embed_profile(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found.")
 
     return {"id": profile_id, "embedded": True}
+
+
+@app.get(
+    "/search",
+    response_model=SearchResponse,
+    summary="Semantic search over candidate profiles",
+    response_description="Profiles ranked by similarity score, optionally filtered.",
+)
+def search_profiles(
+    q: str = Query(..., min_length=1, description="Plain-English search query"),
+    skills: Optional[str] = Query(None, description="Comma-separated required skills (must match all)"),
+    location: Optional[str] = Query(None, description="Location substring filter (case-insensitive)"),
+    k: int = Query(10, ge=1, le=50, description="Number of results to return (default 10, max 50)"),
+):
+    """
+    Embed the query with all-MiniLM-L6-v2, retrieve the top-k nearest profiles
+    from Pinecone, fetch full documents from MongoDB, and apply optional
+    skills / location filters. Repeated identical queries are served from a
+    Redis cache with a 5-minute TTL.
+    """
+    cache_key = f"search:{q}|{skills or ''}|{location or ''}|{k}"
+    r = _redis()
+
+    if r:
+        raw = r.get(cache_key)
+        if raw:
+            stored = json.loads(raw)
+            return {"query": q, "results": stored["results"], "cached": True}
+
+    vector = embed_text(q)
+    # Fetch extra candidates to absorb any filter losses before capping at k.
+    fetch_k = min(k * 4, 100) if (skills or location) else k
+    matches = query_similar(vector, fetch_k)
+
+    db = _db()
+    results = []
+    for match in matches.matches:
+        try:
+            doc = db.profiles.find_one({"_id": ObjectId(match.id)})
+        except Exception:
+            continue
+        if doc is None:
+            continue
+
+        if skills:
+            required = {s.strip().lower() for s in skills.split(",")}
+            doc_skills = {s.lower() for s in (doc.get("skills") or [])}
+            if not required.issubset(doc_skills):
+                continue
+
+        if location:
+            if location.lower() not in (doc.get("location") or "").lower():
+                continue
+
+        _serialize(doc)
+        results.append({"score": match.score, "profile": doc})
+        if len(results) >= k:
+            break
+
+    if r:
+        r.set(cache_key, json.dumps({"results": results}), ex=300)
+
+    return {"query": q, "results": results, "cached": False}

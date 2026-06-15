@@ -82,6 +82,16 @@ def embed_and_store(profile_id: str, doc: dict[str, Any]) -> list[float]:
     return vector
 
 
+def embed_text(text: str) -> list[float]:
+    """Encode a plain string into a 384-dim vector."""
+    return _get_model().encode(text).tolist()
+
+
+def query_similar(vector: list[float], top_k: int):
+    """Query Pinecone for the top_k nearest vectors. Returns a QueryResponse."""
+    return _get_index().query(vector=vector, top_k=top_k, include_metadata=True)
+
+
 def embed_profile_by_id(profile_id: str, db) -> list[float]:
     """Fetch a profile from MongoDB by string id, embed it, and store in Pinecone."""
     doc = db.profiles.find_one({"_id": ObjectId(profile_id)})
