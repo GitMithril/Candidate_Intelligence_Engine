@@ -1,17 +1,39 @@
-# Ignore Python cache files
+# Python
 __pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.Python
 
-# Archive files
-archive/
+# Virtual environments
+.venv/
+venv/
+env/
 
-# Ignore files related to Claude
-CLAUDE.md
-.claudeignore
-.claude/
-AGENTS.md
-Instructions.md
-
-# Ignore environment variable files
+# Environment variables
 .env
 
+# Scraped output
+data/
+*.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archive / drafts
+archive/
+
+# Claude / AI tooling
+CLAUDE.md
+AGENTS.md
+.claudeignore
+.claude/
+instructions.md
+
+# Docs
 setup_env.md
