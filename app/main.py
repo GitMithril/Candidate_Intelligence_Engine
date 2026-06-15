@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient, ReturnDocument
 
-from schemas import (
+from .schemas import (
     CandidateProfile,
     GitHubProfile,
     LinkedInProfile,

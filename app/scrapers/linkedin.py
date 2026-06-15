@@ -22,7 +22,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-from schemas import EducationEntry, ExperienceEntry, LinkedInProfile
+from ..schemas import EducationEntry, ExperienceEntry, LinkedInProfile
 
 load_dotenv()
 

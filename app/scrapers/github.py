@@ -19,7 +19,7 @@ from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 
-from schemas import GitHubProfile, GitHubRepo, LanguageStats
+from ..schemas import GitHubProfile, GitHubRepo, LanguageStats
 
 load_dotenv()
 
