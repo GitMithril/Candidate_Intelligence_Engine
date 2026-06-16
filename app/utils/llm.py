@@ -25,6 +25,7 @@ Use this exact structure (null for any missing field):
 }
 
 Rules:
+- All field values MUST be in English. If the resume contains text in any other language, translate it to English before including it in the JSON.
 - linkedin_url: full URL (https://linkedin.com/in/...) or null
 - github_username: the plain username only, never the full URL
 - experience[].company: the actual company/organisation name, not a handle or URL

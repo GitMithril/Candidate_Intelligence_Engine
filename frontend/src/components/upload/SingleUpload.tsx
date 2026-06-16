@@ -1,9 +1,10 @@
 import { useState, useRef } from "react"
-import { Upload, FileText, GitFork, Link2, CheckCircle, AlertCircle, Loader2, X } from "lucide-react"
+import { Upload, FileText, GitFork, Link2, CheckCircle, AlertCircle, Loader2, X, ExternalLink } from "lucide-react"
 import { ingestSingle, type IngestResponse } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { ProfileModal } from "@/components/ProfileModal"
 import { cn } from "@/lib/utils"
 
 export function SingleUpload() {
@@ -14,6 +15,7 @@ export function SingleUpload() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<IngestResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = (f: File) => {
@@ -60,6 +62,7 @@ export function SingleUpload() {
     setResult(null)
     setError(null)
     setFile(null)
+    setModalOpen(false)
     setLink2Url("")
     setGitForkUsername("")
   }
@@ -75,7 +78,7 @@ export function SingleUpload() {
         </div>
 
         {result ? (
-          <ProfileResult result={result} onReset={reset} />
+          <ProfileResult result={result} onReset={reset} onViewFull={() => setModalOpen(true)} />
         ) : (
           <form onSubmit={handleSubmit} className="space-y-5">
             {/* LinkedIn */}
@@ -161,6 +164,12 @@ export function SingleUpload() {
           </form>
         )}
       </div>
+
+      <ProfileModal
+        profile={result}
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+      />
     </div>
   )
 }
@@ -176,7 +185,7 @@ function Field({ label, icon, children }: { label: string; icon: React.ReactNode
   )
 }
 
-function ProfileResult({ result, onReset }: { result: IngestResponse; onReset: () => void }) {
+function ProfileResult({ result, onReset, onViewFull }: { result: IngestResponse; onReset: () => void; onViewFull: () => void }) {
   return (
     <div className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden">
       {/* Header */}
@@ -186,6 +195,9 @@ function ProfileResult({ result, onReset }: { result: IngestResponse; onReset: (
           <div className="text-sm font-semibold text-purple-900">Profile created</div>
           <div className="text-xs text-purple-600">Stored in MongoDB · Embedded in Pinecone</div>
         </div>
+        <Button variant="ghost" size="sm" onClick={onViewFull} className="text-purple-600 hover:bg-purple-100 gap-1.5">
+          <ExternalLink className="w-3.5 h-3.5" /> Full profile
+        </Button>
         <Button variant="ghost" size="sm" onClick={onReset} className="text-purple-600 hover:bg-purple-100">
           Add another
         </Button>

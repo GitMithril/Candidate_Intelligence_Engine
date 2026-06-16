@@ -79,11 +79,7 @@ async def _login(page: Page, email: str, password: str) -> Optional[str]:
     await page.fill("#username", email)
     await page.fill("#password", password)
     await page.click('button[type="submit"]')
-    try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(4000)
 
     url = page.url.lower()
     # Any of these paths mean we didn't get to the feed.
@@ -144,10 +140,10 @@ async def _navigate_profile(page: Page, url: str) -> None:
     """Navigate to a profile URL and wait for the initial React render."""
     await page.goto(url, wait_until="load", timeout=60000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_selector("main", timeout=15000)
     except Exception:
         pass
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(2000)
 
 
 async def _scroll_sections(page: Page) -> None:
@@ -546,10 +542,10 @@ async def _scrape_skills_page(page: Page, profile_url: str) -> list[str]:
 
     await page.goto(skills_url, wait_until="load", timeout=60000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_selector("main", timeout=15000)
     except Exception:
         pass
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(1000)
 
     # mouse.wheel fires real scroll events that trigger LinkedIn's lazy loading.
     # window.scrollTo does NOT fire scroll events so IntersectionObserver never
