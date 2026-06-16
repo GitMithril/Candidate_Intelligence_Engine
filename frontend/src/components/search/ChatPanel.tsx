@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect } from "react"
 import { Send, Trash2, Bot, User, Loader2, MessageSquare } from "lucide-react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { chatQuery, clearChat, type ChatCitation, type Profile } from "@/api"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 const SESSION_KEY = "cie_chat_session"
+const MESSAGES_KEY = "cie_chat_messages"
 
 const QUICK_PROMPTS = [
   "Who are the strongest Python developers?",
@@ -24,7 +27,14 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<Message[]>(() => {
+    try {
+      const saved = localStorage.getItem(MESSAGES_KEY)
+      return saved ? (JSON.parse(saved) as Message[]) : []
+    } catch {
+      return []
+    }
+  })
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [sessionId, setSessionId] = useState<string | undefined>(
@@ -32,6 +42,10 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
   )
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages))
+  }, [messages])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -69,6 +83,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
     setMessages([])
     setSessionId(undefined)
     localStorage.removeItem(SESSION_KEY)
+    localStorage.removeItem(MESSAGES_KEY)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -97,7 +112,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
             <Bot className="w-4 h-4 text-purple-600" />
           </div>
           <div>
-            <div className="text-sm font-semibold text-gray-900">Candidate Intelligence</div>
+            <div className="text-sm font-semibold text-gray-900">Chat Bot</div>
             <div className="text-xs text-gray-400">RAG · Grounded in your database</div>
           </div>
         </div>
@@ -139,7 +154,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
 
       {/* Input */}
       <div className="flex-none px-4 pb-4 pt-2 border-t border-gray-100">
-        <div className="flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 focus-within:border-purple-400 focus-within:ring-2 focus-within:ring-purple-100 transition-all duration-150 px-4 py-3">
+        <div className="flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 focus-within:shadow-[0_0_0_3px_rgba(124,58,237,0.12)] transition-all duration-150 px-4 py-3">
           <textarea
             ref={inputRef}
             value={input}
@@ -225,7 +240,11 @@ function ChatMessage({ message, onCitationClick }: {
             ? "bg-purple-700 text-white rounded-tr-sm"
             : "bg-gray-50 text-gray-800 rounded-tl-sm border border-gray-100"
         )}>
-          {message.content}
+          {isUser ? message.content : (
+            <div className="chat-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            </div>
+          )}
         </div>
 
         {/* Citations */}

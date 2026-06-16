@@ -397,3 +397,244 @@ LinkedIn's bot protection sometimes would block access from a headless browser s
 Skills were the worst offender. The skills section sits at the very bottom of the profile page and wouldn't render until scrolled to but even after scrolling, the skills array kept coming back empty. The fix was to navigate to LinkedIn's dedicated `/details/skills/` sub-page instead, scroll it incrementally using `page.mouse.wheel` (which fires the scroll events LinkedIn's IntersectionObserver actually listens to, unlike `window.scrollTo`), and extract text from `<p>` tags directly since class names couldn't be relied upon.
 
 That still left noise in the output like navbar items, ad feedback strings, and skill proof entries (e.g. "Software Intern at Mezino Technologies" appearing alongside the actual skill name) all came through in the raw extraction. Each required its own filter: a NOISE regex for UI boilerplate and ad copy, an "at Company" pattern for proof entries, and keyword filters for institution names bleeding in from education data.
+
+---
+
+# Part 2: Bulk Ingestion, RAG Chatbot, and Frontend
+
+**Built for:** Salik Labs Remote Internship - Week 2  
+**Frontend:** `http://localhost:5173` (Vite dev server)
+
+---
+
+## What Was Added
+
+| Area | What changed |
+|---|---|
+| Ingestion | `POST /ingest` (single PDF resume via form upload) |
+| Ingestion | `POST /ingest/bulk` (multiple PDFs or a Google Drive folder, async background job) |
+| Ingestion | `GET /ingest/bulk/{job_id}` (poll bulk job status) |
+| Chat | `POST /chat` (RAG over candidate database, session-aware) |
+| Chat | `DELETE /chat/{session_id}` (clear chat history) |
+| Utils | `app/utils/chat.py` (LLM answer generation via OpenRouter) |
+| Utils | `app/utils/drive.py` (Google Drive folder download via gdown) |
+| Frontend | React 19 + Vite 8 + TypeScript 6 + Tailwind v4 SPA |
+
+---
+
+## New API Endpoints
+
+### `POST /ingest`
+
+Accepts a resume PDF (and optionally a LinkedIn URL and GitHub username) as a multipart form upload. Extracts text from the PDF using `pypdf`, passes it to the LLM to parse structured profile fields, then scrapes any provided social links and merges all sources into one profile stored in MongoDB and embedded in Pinecone.
+
+**Form fields:**
+
+| Field | Type | Required |
+|---|---|---|
+| `resume` | file (PDF) | at least one of the three |
+| `linkedin_url` | string | optional |
+| `github_username` | string | optional |
+
+**Response:** `200 OK` - the merged candidate profile.
+
+---
+
+### `POST /ingest/bulk`
+
+Accepts up to 100 PDF files and/or a Google Drive folder URL containing PDFs. Processing runs in the background. Returns a job ID immediately so the caller can poll for progress.
+
+ZIP archives are also accepted and are extracted server-side. Non-PDF files inside a ZIP are recorded as per-file errors without failing the whole job.
+
+**Form fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `files` | file[] | PDF or ZIP files |
+| `drive_folder_url` | string | Google Drive folder URL (public or shared) |
+
+**Response:** `202 Accepted`
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued",
+  "total": 12
+}
+```
+
+---
+
+### `GET /ingest/bulk/{job_id}`
+
+Poll the status of a bulk ingestion job started with `POST /ingest/bulk`.
+
+**Response:** `200 OK`
+```json
+{
+  "job_id": "...",
+  "status": "processing",
+  "total": 12,
+  "done": 7,
+  "errors": [
+    { "filename": "corrupted.pdf", "error": "not a valid PDF" }
+  ]
+}
+```
+
+`status` is one of `queued`, `processing`, `done`, or `error`.
+
+---
+
+### `POST /chat`
+
+RAG endpoint. Embeds the question, queries Pinecone for the top 5 most relevant candidate vectors, fetches full profiles from MongoDB, and sends them to the LLM (Gemma 4 31B via OpenRouter) as grounded context. The LLM is instructed to answer only from the injected profiles and cite candidates by name.
+
+Chat history is kept in Redis (TTL: 24 hours) and the last 10 turns are injected into each LLM call. Sessions are identified by a UUID returned on the first request and passed back by the client on subsequent requests.
+
+**Request body:**
+```json
+{
+  "question": "Who are the strongest Python developers?",
+  "session_id": null
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "session_id": "550e8400-...",
+  "answer": "Based on the candidates in your database, **Abdullah Naeem** stands out...",
+  "citations": [
+    { "id": "...", "name": "Abdullah Naeem", "score": 0.91 }
+  ]
+}
+```
+
+---
+
+### `DELETE /chat/{session_id}`
+
+Clears the chat history for a session from Redis. Returns `204 No Content`.
+
+---
+
+## New Stack Additions
+
+| Layer | Technology |
+|---|---|
+| LLM | `google/gemma-4-31b-it:free` via OpenRouter (LangChain ChatOpenAI) |
+| PDF parsing | `pypdf` |
+| Drive download | `gdown >= 5.0` |
+| Frontend framework | React 19 + Vite 8 + TypeScript 6 |
+| Styling | Tailwind CSS v4 (CSS-first config via `@import "tailwindcss"`) |
+| UI primitives | Radix UI (Dialog, Progress, Tabs, Label) |
+| Markdown | `react-markdown` + `remark-gfm` |
+
+---
+
+## New Environment Variables
+
+Add these to your `.env` file (backend):
+
+```env
+# OpenRouter (for LLM-based PDF parsing and RAG chat)
+OPENROUTER_API_KEY=sk-or-...
+```
+
+---
+
+## Frontend
+
+The frontend is a single-page React app located in the `frontend/` directory. It has three views accessible from the left sidebar.
+
+### Views
+
+**Single Upload** - Upload one PDF resume with optional LinkedIn URL and GitHub username. Displays the resulting merged profile on success.
+
+**Bulk Import** - Upload up to 100 PDFs or ZIP archives, or paste a Google Drive folder link. Shows a live progress bar by polling the job status endpoint every 2 seconds.
+
+**Search and Chat** - Two-panel layout. Left panel is semantic search with skill and location filters. Right panel is the RAG chatbot. Citation chips in chat messages link to the full candidate profile in a modal dialog. Chat history is persisted in `localStorage` so it survives page navigation and browser refreshes.
+
+### Setup
+
+```powershell
+cd frontend
+
+# Install dependencies
+npm install
+
+# Copy env and set the backend URL
+cp .env.example .env
+# Edit .env: VITE_API_URL=http://localhost:8000
+
+# Start dev server
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+### Frontend Environment Variables
+
+Create `frontend/.env`:
+
+```env
+VITE_API_URL=http://localhost:8000
+```
+
+For production, set `VITE_API_URL` to your Railway backend URL in the Vercel dashboard (Variables section). Vite bakes this in at build time so it must be set before the build runs.
+
+---
+
+## Deploying the Frontend (Vercel)
+
+1. Push the repo to GitHub (the `frontend/` directory is included).
+2. Go to [vercel.com](https://vercel.com) and import the repository.
+3. Set the **Root Directory** to `frontend`.
+4. Under **Environment Variables**, add `VITE_API_URL=https://your-app.up.railway.app`.
+5. Deploy.
+
+Then update the CORS `allow_origins` list in `app/main.py` to include your Vercel domain:
+
+```python
+allow_origins=[
+    "http://localhost:5173",
+    "https://your-app.vercel.app",
+]
+```
+
+Redeploy the backend on Railway after that change.
+
+---
+
+## Project Structure (Updated)
+
+```
+├── app/
+│   ├── scrapers/
+│   │   ├── github.py            # GitHub REST + GraphQL scraper
+│   │   └── linkedin.py          # Playwright-based LinkedIn scraper
+│   ├── utils/
+│   │   ├── chat.py              # LLM answer generation (OpenRouter)
+│   │   └── drive.py             # Google Drive folder download (gdown)
+│   ├── schemas.py               # All Pydantic models
+│   ├── embeddings.py            # Sentence-transformer + Pinecone logic
+│   └── main.py                  # FastAPI app and all endpoints
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ui/              # Reusable UI primitives (Button, Badge, Dialog, etc.)
+│   │   │   ├── search/          # SearchPanel, ChatPanel
+│   │   │   ├── upload/          # SingleUpload, BulkImport
+│   │   │   ├── Layout.tsx       # Sidebar and nav
+│   │   │   └── ProfileModal.tsx # Full candidate profile dialog
+│   │   ├── api.ts               # Typed axios client for all backend endpoints
+│   │   ├── App.tsx              # Root component and view routing
+│   │   └── index.css            # Tailwind v4 + CSS variables + animation keyframes
+│   ├── .env                     # VITE_API_URL (not committed)
+│   └── package.json
+├── scrape_and_store.py          # CLI: scrape and store in one command
+├── embed_all.py                 # Batch embed all MongoDB profiles to Pinecone
+├── docker-compose.yml           # Local dev: API + MongoDB + Redis
+├── Dockerfile                   # Production image
+└── requirements.txt
+```

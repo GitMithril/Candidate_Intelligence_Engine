@@ -33,8 +33,7 @@ export function Layout({ view, onView, children }: LayoutProps) {
             <Zap className="w-3.5 h-3.5 text-white" />
           </div>
           <div>
-            <div className="text-sm font-semibold text-gray-900 leading-none">TalentIQ</div>
-            <div className="text-[10px] text-gray-400 leading-none mt-0.5">Intelligence System</div>
+            <div className="text-[11px] font-semibold text-gray-900 leading-none">Candidate Intelligence Engine</div>
           </div>
         </div>
 
