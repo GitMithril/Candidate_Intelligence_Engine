@@ -28,6 +28,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient, ReturnDocument
 
 from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
@@ -62,6 +63,14 @@ app = FastAPI(
     title="Candidate Intelligence API",
     description="Aggregates GitHub and LinkedIn data into searchable candidate profiles.",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 _client: Optional[MongoClient] = None
