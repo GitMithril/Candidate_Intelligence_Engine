@@ -3,8 +3,12 @@ Candidate Intelligence API — FastAPI application.
 
 Endpoints
 ---------
-POST /profiles        Insert or update a candidate profile.
-GET  /profiles/{id}   Fetch a single profile by MongoDB ObjectId.
+POST /profiles              Insert or update a candidate profile.
+GET  /profiles/{id}         Fetch a single profile by MongoDB ObjectId.
+POST /profiles/{id}/embed   Generate and store a vector embedding.
+GET  /search                Semantic search over candidate profiles.
+POST /scrape                Scrape GitHub/LinkedIn by URL, store and embed automatically.
+POST /ingest                Accept resume PDF + optional URLs, build and store a profile.
 """
 from __future__ import annotations
 
@@ -16,20 +20,29 @@ from typing import Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from pymongo import MongoClient, ReturnDocument
 
-from .embeddings import embed_profile_by_id, embed_text, query_similar
+from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
+from .scrapers.github import scrape_github
+from .scrapers.linkedin import scrape_linkedin
 from .schemas import (
     CandidateProfile,
+    EducationEntry,
+    ExperienceEntry,
     GitHubProfile,
+    IngestResponse,
     LinkedInProfile,
     ProfileCreateRequest,
     ProfileResponse,
+    ResumeExtraction,
+    ScrapeRequest,
     SearchResponse,
     SearchResult,
     SourceUrls,
 )
+from .utils.llm import parse_resume
+from .utils.pdf import extract_pdf_text
 
 load_dotenv()
 
@@ -283,3 +296,194 @@ def search_profiles(
         r.set(cache_key, json.dumps({"results": results}), ex=300)
 
     return {"query": q, "results": results, "cached": False}
+
+
+def _build_from_resume(resume_data: ResumeExtraction) -> CandidateProfile:
+    """Construct a CandidateProfile from resume-extracted data alone (no scraping)."""
+    first = resume_data.experience[0] if resume_data.experience else None
+    return CandidateProfile(
+        scraped_at=datetime.now(timezone.utc).isoformat(),
+        source_urls=SourceUrls(),
+        name=resume_data.name,
+        current_role=first.title if first else None,
+        current_company=first.company if first else None,
+        skills=resume_data.skills,
+        experience=[ExperienceEntry(**e.model_dump()) for e in resume_data.experience],
+        education=[EducationEntry(**e.model_dump()) for e in resume_data.education],
+        github_email=resume_data.email,
+    )
+
+
+def _store_and_embed(doc: dict, filter_q: Optional[dict]) -> dict:
+    """Upsert doc into MongoDB and embed in Pinecone. Returns the serialized doc."""
+    db = _db()
+    if filter_q:
+        result = db.profiles.find_one_and_replace(
+            filter_q, doc, upsert=True, return_document=ReturnDocument.AFTER
+        )
+    else:
+        ins = db.profiles.insert_one(doc)
+        result = db.profiles.find_one({"_id": ins.inserted_id})
+    embed_and_store(str(result["_id"]), result)
+    return result
+
+
+@app.post(
+    "/scrape",
+    response_model=ProfileResponse,
+    status_code=201,
+    summary="Scrape GitHub and/or LinkedIn and store the result",
+    response_description="The scraped, stored, and embedded candidate profile.",
+)
+def scrape(req: ScrapeRequest):
+    """
+    Trigger a live GitHub and/or LinkedIn scrape by providing a username / URL.
+    The resulting profile is stored in MongoDB and automatically embedded in Pinecone.
+    """
+    gh_profile: Optional[GitHubProfile] = None
+    li_profile: Optional[LinkedInProfile] = None
+
+    if req.github_username:
+        try:
+            gh_profile = scrape_github(req.github_username)
+        except Exception as exc:
+            if not req.linkedin_url:
+                raise HTTPException(status_code=502, detail=f"GitHub scraping failed: {exc}")
+
+    if req.linkedin_url:
+        li_profile = scrape_linkedin(req.linkedin_url)
+
+    profile_req = ProfileCreateRequest(
+        github_username=req.github_username,
+        github_profile=gh_profile,
+        linkedin_url=req.linkedin_url,
+        linkedin_profile=li_profile,
+    )
+    doc = _merge(profile_req).model_dump()
+
+    filter_q = (
+        {"github_username": req.github_username}
+        if req.github_username
+        else {"source_urls.linkedin": req.linkedin_url}
+    )
+    result = _store_and_embed(doc, filter_q)
+    return _serialize(result)
+
+
+@app.post(
+    "/ingest",
+    response_model=IngestResponse,
+    status_code=201,
+    summary="Ingest a resume PDF and optional URLs into a unified candidate profile",
+    response_description="The stored profile, with missing_links listing any URLs not found.",
+)
+def ingest(
+    linkedin_url: Optional[str] = Form(None),
+    github_username: Optional[str] = Form(None),
+    resume: Optional[UploadFile] = File(None),
+):
+    """
+    Accept any combination of a resume PDF, a LinkedIn URL, and a GitHub username.
+    The resume is parsed by an LLM to extract structured fields and any embedded URLs.
+    Missing URLs are returned in `missing_links` so the caller can prompt the user.
+    The profile is stored in MongoDB and embedded in Pinecone automatically.
+    """
+    if not linkedin_url and not github_username and not resume:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one of: resume (PDF), linkedin_url, github_username",
+        )
+
+    resume_data: Optional[ResumeExtraction] = None
+    missing_links: list[str] = []
+
+    if resume:
+        content = resume.file.read()
+        text = extract_pdf_text(content)
+        try:
+            resume_data = parse_resume(text)
+        except Exception as exc:
+            if not linkedin_url and not github_username:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Resume parsing failed and no URLs were provided: {exc}",
+                )
+            # URLs are available — continue without resume-extracted fields.
+            resume_data = None
+
+        if not linkedin_url:
+            if resume_data.linkedin_url:
+                linkedin_url = resume_data.linkedin_url
+            else:
+                missing_links.append("linkedin_url")
+
+        if not github_username:
+            if resume_data.github_username:
+                github_username = resume_data.github_username
+            else:
+                missing_links.append("github_username")
+
+    gh_profile: Optional[GitHubProfile] = None
+    li_profile: Optional[LinkedInProfile] = None
+
+    if github_username:
+        try:
+            gh_profile = scrape_github(github_username)
+        except Exception:
+            pass  # not fatal — resume or LinkedIn may cover identity fields
+
+    if linkedin_url:
+        li_profile = scrape_linkedin(linkedin_url)
+
+    # Resume fills gaps when LinkedIn is unavailable or blocked.
+    if li_profile is None and resume_data:
+        first = resume_data.experience[0] if resume_data.experience else None
+        li_profile = LinkedInProfile(
+            name=resume_data.name,
+            current_role=first.title if first else None,
+            current_company=first.company if first else None,
+            skills=resume_data.skills,
+            experience=[ExperienceEntry(**e.model_dump()) for e in resume_data.experience],
+            education=[EducationEntry(**e.model_dump()) for e in resume_data.education],
+        )
+    elif li_profile is not None and resume_data:
+        # Union resume skills into LinkedIn skills (LinkedIn takes precedence for duplicates).
+        existing_lower = {s.lower() for s in li_profile.skills}
+        extra = [s for s in resume_data.skills if s.lower() not in existing_lower]
+        li_profile.skills.extend(extra)
+
+    # Build the unified CandidateProfile.
+    if github_username or linkedin_url:
+        profile_req = ProfileCreateRequest(
+            github_username=github_username,
+            github_profile=gh_profile,
+            linkedin_url=linkedin_url,
+            linkedin_profile=li_profile,
+        )
+        profile = _merge(profile_req)
+    elif resume_data:
+        profile = _build_from_resume(resume_data)
+    else:
+        raise HTTPException(status_code=422, detail="Could not extract any usable profile data.")
+
+    doc = profile.model_dump()
+
+    # Supplement email from resume when GitHub didn't provide one.
+    if resume_data and resume_data.email and not doc.get("github_email"):
+        doc["github_email"] = resume_data.email
+
+    # Dedup key: GitHub username > LinkedIn URL > resume email > no dedup (fresh insert).
+    if github_username:
+        filter_q: Optional[dict] = {"github_username": github_username}
+    elif linkedin_url:
+        filter_q = {"source_urls.linkedin": linkedin_url}
+    elif resume_data and resume_data.email:
+        filter_q = {"github_email": resume_data.email}
+    else:
+        filter_q = None
+
+    result = _store_and_embed(doc, filter_q)
+    _serialize(result)
+    result["missing_links"] = missing_links
+    result["resume_parsed"] = resume_data is not None
+    return result

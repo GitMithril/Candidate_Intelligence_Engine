@@ -34,6 +34,7 @@ AGENTS.md
 .claudeignore
 .claude/
 instructions.md
+project-instructions.md
 
 # Docs
 setup_env.md

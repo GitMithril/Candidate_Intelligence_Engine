@@ -663,6 +663,12 @@ def scrape_linkedin(profile_url: str) -> LinkedInProfile:
     Never raises. Sets `warning` on partial or total failure.
     Auth: LINKEDIN_LI_AT cookie (preferred) or LINKEDIN_EMAIL + LINKEDIN_PASSWORD.
     """
+    import sys
+    # On Windows, asyncio.run() inside a worker thread creates a SelectorEventLoop,
+    # which does not support subprocess creation (required by Playwright to launch a
+    # browser). ProactorEventLoop supports it, so we set the policy explicitly.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     return asyncio.run(_scrape(profile_url))
 
 

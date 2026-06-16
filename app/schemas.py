@@ -199,3 +199,46 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
     cached: bool
+
+
+# ── Phase 2 schemas ────────────────────────────────────────────────────────────
+
+class ScrapeRequest(BaseModel):
+    github_username: Optional[str] = None
+    linkedin_url: Optional[str] = None
+
+    @model_validator(mode="after")
+    def at_least_one(self) -> "ScrapeRequest":
+        if not self.github_username and not self.linkedin_url:
+            raise ValueError("Provide at least one of github_username or linkedin_url")
+        return self
+
+
+class ResumeExperience(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    duration: Optional[str] = None
+    location: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ResumeEducation(BaseModel):
+    school: Optional[str] = None
+    degree: Optional[str] = None
+    field: Optional[str] = None
+    dates: Optional[str] = None
+
+
+class ResumeExtraction(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    github_username: Optional[str] = None
+    skills: list[str] = Field(default_factory=list)
+    experience: list[ResumeExperience] = Field(default_factory=list)
+    education: list[ResumeEducation] = Field(default_factory=list)
+
+
+class IngestResponse(ProfileResponse):
+    missing_links: list[str] = Field(default_factory=list)
+    resume_parsed: bool = False
