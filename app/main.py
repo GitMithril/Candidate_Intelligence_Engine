@@ -3,30 +3,37 @@ Candidate Intelligence API — FastAPI application.
 
 Endpoints
 ---------
-POST /profiles              Insert or update a candidate profile.
-GET  /profiles/{id}         Fetch a single profile by MongoDB ObjectId.
-POST /profiles/{id}/embed   Generate and store a vector embedding.
-GET  /search                Semantic search over candidate profiles.
-POST /scrape                Scrape GitHub/LinkedIn by URL, store and embed automatically.
-POST /ingest                Accept resume PDF + optional URLs, build and store a profile.
+POST /profiles                  Insert or update a candidate profile.
+GET  /profiles/{id}             Fetch a single profile by MongoDB ObjectId.
+POST /profiles/{id}/embed       Generate and store a vector embedding.
+GET  /search                    Semantic search over candidate profiles.
+POST /scrape                    Scrape GitHub/LinkedIn by URL, store and embed automatically.
+POST /ingest                    Accept resume PDF + optional URLs, build and store a profile.
+POST /ingest/bulk               Start a background bulk ingestion job (PDFs, ZIP, or Drive URL).
+GET  /ingest/bulk/{job_id}      Poll progress of a bulk ingestion job.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import uuid
+import zipfile
 from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from pymongo import MongoClient, ReturnDocument
 
 from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
 from .scrapers.github import scrape_github
 from .scrapers.linkedin import scrape_linkedin
 from .schemas import (
+    BulkIngestResponse,
+    BulkJobStatus,
     CandidateProfile,
     EducationEntry,
     ExperienceEntry,
@@ -108,6 +115,25 @@ def _redis() -> Optional[_RedisAdapter]:
         else:
             _redis_client = None
     return _redis_client
+
+
+_job_store: dict[str, dict] = {}
+
+
+def _save_job(job_id: str, state: dict) -> None:
+    _job_store[job_id] = state
+    r = _redis()
+    if r:
+        r.set(f"bulk_job:{job_id}", json.dumps(state), ex=3600)
+
+
+def _load_job(job_id: str) -> Optional[dict]:
+    r = _redis()
+    if r:
+        raw = r.get(f"bulk_job:{job_id}")
+        if raw:
+            return json.loads(raw)
+    return _job_store.get(job_id)
 
 
 def _merge(req: ProfileCreateRequest) -> CandidateProfile:
@@ -328,6 +354,148 @@ def _store_and_embed(doc: dict, filter_q: Optional[dict]) -> dict:
     return result
 
 
+def _assemble_and_store(
+    resume_data: Optional[ResumeExtraction],
+    linkedin_url: Optional[str],
+    github_username: Optional[str],
+) -> dict:
+    """Scrape URLs, merge with resume data, store in MongoDB, embed in Pinecone.
+
+    Returns the serialized stored document (with 'id').
+    Raises ValueError if no usable profile data can be assembled.
+    """
+    gh_profile: Optional[GitHubProfile] = None
+    li_profile: Optional[LinkedInProfile] = None
+
+    if github_username:
+        try:
+            gh_profile = scrape_github(github_username)
+        except Exception:
+            pass
+
+    if linkedin_url:
+        li_profile = scrape_linkedin(linkedin_url)
+
+    if li_profile is None and resume_data:
+        first = resume_data.experience[0] if resume_data.experience else None
+        li_profile = LinkedInProfile(
+            name=resume_data.name,
+            current_role=first.title if first else None,
+            current_company=first.company if first else None,
+            skills=resume_data.skills,
+            experience=[ExperienceEntry(**e.model_dump()) for e in resume_data.experience],
+            education=[EducationEntry(**e.model_dump()) for e in resume_data.education],
+        )
+    elif li_profile is not None and resume_data:
+        existing_lower = {s.lower() for s in li_profile.skills}
+        extra = [s for s in resume_data.skills if s.lower() not in existing_lower]
+        li_profile.skills.extend(extra)
+
+    if github_username or linkedin_url:
+        profile_req = ProfileCreateRequest(
+            github_username=github_username,
+            github_profile=gh_profile,
+            linkedin_url=linkedin_url,
+            linkedin_profile=li_profile,
+        )
+        profile = _merge(profile_req)
+    elif resume_data:
+        profile = _build_from_resume(resume_data)
+    else:
+        raise ValueError("No profile data could be assembled.")
+
+    doc = profile.model_dump()
+    if resume_data and resume_data.email and not doc.get("github_email"):
+        doc["github_email"] = resume_data.email
+
+    if github_username:
+        filter_q: Optional[dict] = {"github_username": github_username}
+    elif linkedin_url:
+        filter_q = {"source_urls.linkedin": linkedin_url}
+    elif resume_data and resume_data.email:
+        filter_q = {"github_email": resume_data.email}
+    else:
+        filter_q = None
+
+    result = _store_and_embed(doc, filter_q)
+    return _serialize(result)
+
+
+def _extract_zip_pdfs(zip_bytes: bytes) -> tuple[list[tuple[str, bytes]], list[dict]]:
+    """Extract PDFs from a ZIP archive.
+
+    Returns (pdf_items, errors). Non-PDFs and directories are recorded in errors.
+    """
+    pdf_items: list[tuple[str, bytes]] = []
+    errors: list[dict] = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for name in zf.namelist():
+            if name.endswith("/") or name.startswith("__MACOSX") or name.startswith("."):
+                continue
+            data = zf.read(name)
+            if data[:4] == b"%PDF":
+                pdf_items.append((name, data))
+            else:
+                errors.append({"file": name, "error": f"'{name}' is not a PDF — skipped."})
+
+    return pdf_items, errors
+
+
+def _process_resume_bytes(filename: str, pdf_bytes: bytes) -> dict:
+    """Extract, parse, and store a single resume PDF. Raises on any error."""
+    if pdf_bytes[:4] != b"%PDF":
+        raise ValueError(f"'{filename}' is not a valid PDF.")
+
+    text = extract_pdf_text(pdf_bytes)
+    if not text.strip():
+        raise ValueError(f"Could not extract text from '{filename}'.")
+
+    resume_data = parse_resume(text)
+
+    if not any([resume_data.name, resume_data.email, resume_data.skills, resume_data.experience]):
+        raise ValueError(f"LLM could not extract usable data from '{filename}'.")
+
+    return _assemble_and_store(resume_data, resume_data.linkedin_url, resume_data.github_username)
+
+
+def _run_bulk_ingest(job_id: str, items: list[tuple[str, bytes]], drive_url: Optional[str]) -> None:
+    """Background task: process each PDF, updating job state after every file."""
+    state = _load_job(job_id)
+    state["status"] = "running"
+    _save_job(job_id, state)
+
+    all_items = list(items)
+
+    if drive_url:
+        try:
+            from .utils.drive import download_drive_pdfs
+            drive_items = download_drive_pdfs(drive_url)
+            all_items.extend(drive_items)
+            state["total"] = len(all_items)
+            _save_job(job_id, state)
+        except Exception as exc:
+            state["failed"] += 1
+            state["errors"].append({"file": "google_drive", "error": str(exc)})
+            _save_job(job_id, state)
+            if not all_items:
+                state["status"] = "complete"
+                _save_job(job_id, state)
+                return
+
+    for filename, pdf_bytes in all_items:
+        try:
+            _process_resume_bytes(filename, pdf_bytes)
+            state["processed"] += 1
+        except Exception as exc:
+            state["failed"] += 1
+            state["errors"].append({"file": filename, "error": str(exc)})
+        _save_job(job_id, state)
+
+    state["status"] = "complete"
+    _save_job(job_id, state)
+
+
 @app.post(
     "/scrape",
     response_model=ProfileResponse,
@@ -378,8 +546,8 @@ def scrape(req: ScrapeRequest):
     response_description="The stored profile, with missing_links listing any URLs not found.",
 )
 def ingest(
-    linkedin_url: Optional[str] = Form(None),
-    github_username: Optional[str] = Form(None),
+    linkedin_url: Optional[str] = Form(default=None, example="https://linkedin.com/in/username"),
+    github_username: Optional[str] = Form(default=None, example="github-username"),
     resume: Optional[UploadFile] = File(None),
 ):
     """
@@ -399,6 +567,8 @@ def ingest(
 
     if resume:
         content = resume.file.read()
+        if content[:4] != b"%PDF":
+            raise HTTPException(status_code=400, detail=f"'{resume.filename}' is not a valid PDF.")
         text = extract_pdf_text(content)
         try:
             resume_data = parse_resume(text)
@@ -408,82 +578,105 @@ def ingest(
                     status_code=422,
                     detail=f"Resume parsing failed and no URLs were provided: {exc}",
                 )
-            # URLs are available — continue without resume-extracted fields.
             resume_data = None
 
-        if not linkedin_url:
-            if resume_data.linkedin_url:
-                linkedin_url = resume_data.linkedin_url
-            else:
-                missing_links.append("linkedin_url")
+        if resume_data is not None:
+            if not linkedin_url:
+                if resume_data.linkedin_url:
+                    linkedin_url = resume_data.linkedin_url
+                else:
+                    missing_links.append("linkedin_url")
+            if not github_username:
+                if resume_data.github_username:
+                    github_username = resume_data.github_username
+                else:
+                    missing_links.append("github_username")
 
-        if not github_username:
-            if resume_data.github_username:
-                github_username = resume_data.github_username
-            else:
-                missing_links.append("github_username")
+    try:
+        result = _assemble_and_store(resume_data, linkedin_url, github_username)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
-    gh_profile: Optional[GitHubProfile] = None
-    li_profile: Optional[LinkedInProfile] = None
-
-    if github_username:
-        try:
-            gh_profile = scrape_github(github_username)
-        except Exception:
-            pass  # not fatal — resume or LinkedIn may cover identity fields
-
-    if linkedin_url:
-        li_profile = scrape_linkedin(linkedin_url)
-
-    # Resume fills gaps when LinkedIn is unavailable or blocked.
-    if li_profile is None and resume_data:
-        first = resume_data.experience[0] if resume_data.experience else None
-        li_profile = LinkedInProfile(
-            name=resume_data.name,
-            current_role=first.title if first else None,
-            current_company=first.company if first else None,
-            skills=resume_data.skills,
-            experience=[ExperienceEntry(**e.model_dump()) for e in resume_data.experience],
-            education=[EducationEntry(**e.model_dump()) for e in resume_data.education],
-        )
-    elif li_profile is not None and resume_data:
-        # Union resume skills into LinkedIn skills (LinkedIn takes precedence for duplicates).
-        existing_lower = {s.lower() for s in li_profile.skills}
-        extra = [s for s in resume_data.skills if s.lower() not in existing_lower]
-        li_profile.skills.extend(extra)
-
-    # Build the unified CandidateProfile.
-    if github_username or linkedin_url:
-        profile_req = ProfileCreateRequest(
-            github_username=github_username,
-            github_profile=gh_profile,
-            linkedin_url=linkedin_url,
-            linkedin_profile=li_profile,
-        )
-        profile = _merge(profile_req)
-    elif resume_data:
-        profile = _build_from_resume(resume_data)
-    else:
-        raise HTTPException(status_code=422, detail="Could not extract any usable profile data.")
-
-    doc = profile.model_dump()
-
-    # Supplement email from resume when GitHub didn't provide one.
-    if resume_data and resume_data.email and not doc.get("github_email"):
-        doc["github_email"] = resume_data.email
-
-    # Dedup key: GitHub username > LinkedIn URL > resume email > no dedup (fresh insert).
-    if github_username:
-        filter_q: Optional[dict] = {"github_username": github_username}
-    elif linkedin_url:
-        filter_q = {"source_urls.linkedin": linkedin_url}
-    elif resume_data and resume_data.email:
-        filter_q = {"github_email": resume_data.email}
-    else:
-        filter_q = None
-
-    result = _store_and_embed(doc, filter_q)
-    _serialize(result)
     result["missing_links"] = missing_links
     result["resume_parsed"] = resume_data is not None
     return result
+
+
+@app.post(
+    "/ingest/bulk",
+    response_model=BulkIngestResponse,
+    status_code=202,
+    summary="Start a background bulk resume ingestion job",
+    response_description="Job ID to poll via GET /ingest/bulk/{job_id}.",
+)
+def ingest_bulk(
+    background_tasks: BackgroundTasks,
+    files: Optional[list[UploadFile]] = File(None),
+    drive_url: Optional[str] = Form(default=None, example="https://drive.google.com/drive/folders/FOLDER_ID"),
+):
+    """
+    Accept multiple PDFs, a ZIP archive containing PDFs, or a public Google Drive
+    folder URL (or any combination). Processing runs in the background.
+
+    Non-PDF direct uploads are rejected immediately with HTTP 400.
+    Non-PDF files inside a ZIP or Drive folder are recorded as errors and skipped.
+
+    Poll GET /ingest/bulk/{job_id} for progress.
+    """
+    if not files and not drive_url:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one of: files (PDF or ZIP), drive_url (public Google Drive folder URL).",
+        )
+
+    items: list[tuple[str, bytes]] = []
+    pre_errors: list[dict] = []
+
+    for f in (files or []):
+        data = f.file.read()
+        name = f.filename or "upload"
+
+        if data[:4] == b"PK\x03\x04":
+            pdf_items, zip_errors = _extract_zip_pdfs(data)
+            items.extend(pdf_items)
+            pre_errors.extend(zip_errors)
+        elif data[:4] == b"%PDF":
+            items.append((name, data))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{name}' is not a PDF or ZIP file. Only PDF and ZIP uploads are accepted.",
+            )
+
+    if not items and not drive_url:
+        raise HTTPException(status_code=422, detail="No valid PDF files found in the uploaded files.")
+
+    job_id = str(uuid.uuid4())
+    _save_job(job_id, {
+        "status": "pending",
+        "total": len(items),
+        "processed": 0,
+        "failed": len(pre_errors),
+        "errors": pre_errors,
+    })
+
+    background_tasks.add_task(_run_bulk_ingest, job_id, items, drive_url)
+
+    return {"job_id": job_id, "status": "pending", "total": len(items)}
+
+
+@app.get(
+    "/ingest/bulk/{job_id}",
+    response_model=BulkJobStatus,
+    summary="Poll the status of a bulk ingestion job",
+    response_description="Current progress of the bulk ingestion job.",
+)
+def get_bulk_job(job_id: str):
+    """
+    Returns the current status (pending / running / complete), counts of processed
+    and failed files, and a per-file error list for anything that was skipped.
+    """
+    state = _load_job(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return {"job_id": job_id, **state}

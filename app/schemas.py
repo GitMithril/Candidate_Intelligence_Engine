@@ -242,3 +242,25 @@ class ResumeExtraction(BaseModel):
 class IngestResponse(ProfileResponse):
     missing_links: list[str] = Field(default_factory=list)
     resume_parsed: bool = False
+
+
+# ── Bulk ingestion schemas ─────────────────────────────────────────────────────
+
+class BulkJobError(BaseModel):
+    file: str
+    error: str
+
+
+class BulkJobStatus(BaseModel):
+    job_id: str
+    status: str  # pending | running | complete
+    total: int
+    processed: int
+    failed: int
+    errors: list[BulkJobError] = Field(default_factory=list)
+
+
+class BulkIngestResponse(BaseModel):
+    job_id: str
+    status: str
+    total: int
