@@ -11,6 +11,8 @@ POST /scrape                    Scrape GitHub/LinkedIn by URL, store and embed a
 POST /ingest                    Accept resume PDF + optional URLs, build and store a profile.
 POST /ingest/bulk               Start a background bulk ingestion job (PDFs, ZIP, or Drive URL).
 GET  /ingest/bulk/{job_id}      Poll progress of a bulk ingestion job.
+POST /chat                      Conversational RAG over the candidate database; returns answer + citations.
+DELETE /chat/{session_id}       Clear a chat session history.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from typing import Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from pymongo import MongoClient, ReturnDocument
 
 from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
@@ -34,6 +36,9 @@ from .scrapers.linkedin import scrape_linkedin
 from .schemas import (
     BulkIngestResponse,
     BulkJobStatus,
+    ChatCitation,
+    ChatRequest,
+    ChatResponse,
     CandidateProfile,
     EducationEntry,
     ExperienceEntry,
@@ -83,6 +88,9 @@ class _RedisAdapter:
     def set(self, key: str, value: str, ex: int = 300) -> None:
         self._c.set(key, value, ex=ex)
 
+    def delete(self, key: str) -> None:
+        self._c.delete(key)
+
 
 def _db():
     global _client
@@ -118,6 +126,7 @@ def _redis() -> Optional[_RedisAdapter]:
 
 
 _job_store: dict[str, dict] = {}
+_chat_store: dict[str, list] = {}
 
 
 def _save_job(job_id: str, state: dict) -> None:
@@ -134,6 +143,29 @@ def _load_job(job_id: str) -> Optional[dict]:
         if raw:
             return json.loads(raw)
     return _job_store.get(job_id)
+
+
+def _load_history(session_id: str) -> list[dict]:
+    r = _redis()
+    if r:
+        raw = r.get(f"chat:{session_id}")
+        if raw:
+            return json.loads(raw)
+    return _chat_store.get(session_id, [])
+
+
+def _save_history(session_id: str, history: list[dict]) -> None:
+    _chat_store[session_id] = history
+    r = _redis()
+    if r:
+        r.set(f"chat:{session_id}", json.dumps(history), ex=86400)
+
+
+def _delete_history(session_id: str) -> None:
+    _chat_store.pop(session_id, None)
+    r = _redis()
+    if r:
+        r.delete(f"chat:{session_id}")
 
 
 def _merge(req: ProfileCreateRequest) -> CandidateProfile:
@@ -680,3 +712,72 @@ def get_bulk_job(job_id: str):
     if state is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     return {"job_id": job_id, **state}
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    summary="Conversational RAG over the candidate database",
+    response_description="The assistant's answer grounded in matching candidate profiles, plus citations.",
+)
+def chat(req: ChatRequest):
+    """
+    Ask any recruiter question about the candidates in the database.
+    The system retrieves the most relevant profiles from Pinecone, passes them as
+    context to the LLM, and returns a grounded answer along with source citations
+    (candidate id, name, similarity score).
+
+    Provide a `session_id` to continue an existing conversation; omit it to start
+    a new session. Session history is persisted in Redis for 24 hours.
+    """
+    session_id = req.session_id or str(uuid.uuid4())
+    history = _load_history(session_id)
+
+    vector = embed_text(req.question)
+    matches = query_similar(vector, 5)
+
+    db = _db()
+    candidates: list[dict] = []
+    citations: list[ChatCitation] = []
+    for match in matches.matches:
+        try:
+            doc = db.profiles.find_one({"_id": ObjectId(match.id)})
+        except Exception:
+            continue
+        if doc is None:
+            continue
+        _serialize(doc)
+        candidates.append(doc)
+        citations.append(ChatCitation(
+            id=doc["id"],
+            name=doc.get("name") or "Unknown",
+            score=round(match.score, 4),
+        ))
+
+    from .utils.chat import answer_question
+    try:
+        answer = answer_question(req.question, history, candidates)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+
+    history.append({"role": "human", "content": req.question})
+    history.append({"role": "assistant", "content": answer})
+    _save_history(session_id, history)
+
+    return ChatResponse(session_id=session_id, answer=answer, citations=citations)
+
+
+@app.delete(
+    "/chat/{session_id}",
+    status_code=204,
+    summary="Clear a chat session",
+    response_description="No content — session history has been deleted.",
+)
+def delete_chat_session(session_id: str):
+    """
+    Delete all conversation history for the given session_id from Redis.
+    After this call the session_id is invalid; the next POST /chat with this
+    session_id will start a fresh conversation.
+    """
+    _delete_history(session_id)
+    return Response(status_code=204)

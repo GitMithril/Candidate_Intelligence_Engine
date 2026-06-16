@@ -264,3 +264,22 @@ class BulkIngestResponse(BaseModel):
     job_id: str
     status: str
     total: int
+
+
+# ── Chat schemas ───────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    session_id: Optional[str] = None
+
+
+class ChatCitation(BaseModel):
+    id: str
+    name: str
+    score: float
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    answer: str
+    citations: list[ChatCitation]
