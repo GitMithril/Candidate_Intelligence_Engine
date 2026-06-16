@@ -50,6 +50,9 @@ Create a `.env` file in the project root:
 # GitHub
 GITHUB_TOKEN=ghp_...
 
+# API URL (Defaults to local deployment, set to production to update production)
+API_URL=https://candidateintelligenceengine-production.up.railway.app
+
 # LinkedIn (extract li_at cookie after logging in manually)
 LINKEDIN_LI_AT=AQE...
 
