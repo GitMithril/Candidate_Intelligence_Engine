@@ -372,6 +372,7 @@ def _build_from_resume(resume_data: ResumeExtraction) -> CandidateProfile:
         scraped_at=datetime.now(timezone.utc).isoformat(),
         source_urls=SourceUrls(),
         name=resume_data.name,
+        location=resume_data.location,
         current_role=first.title if first else None,
         current_company=first.company if first else None,
         skills=resume_data.skills,
@@ -421,6 +422,7 @@ def _assemble_and_store(
         first = resume_data.experience[0] if resume_data.experience else None
         li_profile = LinkedInProfile(
             name=resume_data.name,
+            location=resume_data.location,
             current_role=first.title if first else None,
             current_company=first.company if first else None,
             skills=resume_data.skills,
@@ -444,6 +446,10 @@ def _assemble_and_store(
         profile = _build_from_resume(resume_data)
     else:
         raise ValueError("No profile data could be assembled.")
+
+    # Resume location takes priority over scraped LinkedIn/GitHub location.
+    if resume_data and resume_data.location:
+        profile.location = resume_data.location
 
     doc = profile.model_dump()
     if resume_data and resume_data.email and not doc.get("github_email"):

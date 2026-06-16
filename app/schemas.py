@@ -232,6 +232,7 @@ class ResumeEducation(BaseModel):
 class ResumeExtraction(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
+    location: Optional[str] = None
     linkedin_url: Optional[str] = None
     github_username: Optional[str] = None
     skills: list[str] = Field(default_factory=list)

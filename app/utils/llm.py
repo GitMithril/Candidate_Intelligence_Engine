@@ -13,6 +13,7 @@ Use this exact structure (null for any missing field):
 {
   "name": "Full Name",
   "email": "email@example.com",
+  "location": "City, Country",
   "linkedin_url": "https://linkedin.com/in/username",
   "github_username": "username_only_no_url",
   "skills": ["Python", "FastAPI", "..."],
@@ -26,8 +27,9 @@ Use this exact structure (null for any missing field):
 
 Rules:
 - All field values MUST be in English. If the resume contains text in any other language, translate it to English before including it in the JSON.
-- linkedin_url: full URL (https://linkedin.com/in/...) or null
-- github_username: the plain username only, never the full URL
+- location: extract the candidate's current city/country from the resume header or contact section (e.g. "Islamabad, Pakistan"). null if not found.
+- linkedin_url: full URL (https://linkedin.com/in/...) or null. Check both visible text and the "Links found in document" section at the end.
+- github_username: the plain username only, never the full URL. Check both visible text and the "Links found in document" section at the end.
 - experience[].company: the actual company/organisation name, not a handle or URL
 - Scan the ENTIRE document including the bottom — education is often at the end
 - Output ONLY the JSON object. No markdown fences. No explanation."""
