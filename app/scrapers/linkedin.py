@@ -35,8 +35,12 @@ _LOGIN = f"{_BASE}/login"
 async def _launch(playwright) -> tuple[Browser, BrowserContext]:
     """Return a Chromium browser + context configured to minimise bot signals."""
     browser = await playwright.chromium.launch(
-        headless=False,
-        args=["--disable-blink-features=AutomationControlled"],
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
     )
     context = await browser.new_context(
         user_agent=(
