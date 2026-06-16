@@ -15,7 +15,6 @@ env/
 
 # Scraped output
 data/
-*.json
 
 # IDE
 .vscode/
@@ -66,3 +65,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+.mcp.json
