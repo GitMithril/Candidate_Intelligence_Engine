@@ -19,12 +19,15 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -395,7 +398,9 @@ def _store_and_embed(doc: dict, filter_q: Optional[dict]) -> dict:
     else:
         ins = db.profiles.insert_one(doc)
         result = db.profiles.find_one({"_id": ins.inserted_id})
+    logger.info("[ingest] Stored profile id=%s name=%r", result["_id"], result.get("name"))
     embed_and_store(str(result["_id"]), result)
+    logger.info("[ingest] Embedded profile id=%s", result["_id"])
     return result
 
 
@@ -413,15 +418,25 @@ def _assemble_and_store(
     li_profile: Optional[LinkedInProfile] = None
 
     if github_username:
+        logger.info("[ingest] GitHub scrape start: %s", github_username)
         try:
             gh_profile = scrape_github(github_username)
-        except Exception:
-            pass
+            logger.info("[ingest] GitHub scrape OK: %s (repos=%s, langs=%s)", github_username, gh_profile.public_repos, len(gh_profile.top_languages))
+        except Exception as exc:
+            logger.warning("[ingest] GitHub scrape failed: %s — %s", github_username, exc)
 
     if linkedin_url:
+        logger.info("[ingest] LinkedIn scrape start: %s", linkedin_url)
         li_profile = scrape_linkedin(linkedin_url)
+        if li_profile.warning:
+            logger.warning("[ingest] LinkedIn scrape warning: %s", li_profile.warning)
+        else:
+            logger.info("[ingest] LinkedIn scrape OK: name=%r, exp=%d, edu=%d, skills=%d", li_profile.name, len(li_profile.experience), len(li_profile.education), len(li_profile.skills))
 
-    if li_profile is None and resume_data:
+    li_failed = li_profile is not None and li_profile.warning and not li_profile.name
+    if li_failed:
+        logger.info("[ingest] LinkedIn scrape failed with no data — falling back to resume data")
+    if (li_profile is None or li_failed) and resume_data:
         first = resume_data.experience[0] if resume_data.experience else None
         li_profile = LinkedInProfile(
             name=resume_data.name,
@@ -431,6 +446,7 @@ def _assemble_and_store(
             skills=resume_data.skills,
             experience=[ExperienceEntry(**e.model_dump()) for e in resume_data.experience],
             education=[EducationEntry(**e.model_dump()) for e in resume_data.education],
+            warning=li_profile.warning if li_failed else None,
         )
     elif li_profile is not None and resume_data:
         existing_lower = {s.lower() for s in li_profile.skills}
@@ -494,14 +510,17 @@ def _extract_zip_pdfs(zip_bytes: bytes) -> tuple[list[tuple[str, bytes]], list[d
 
 def _process_resume_bytes(filename: str, pdf_bytes: bytes) -> dict:
     """Extract, parse, and store a single resume PDF. Raises on any error."""
+    logger.info("[bulk] Processing: %s", filename)
     if pdf_bytes[:4] != b"%PDF":
         raise ValueError(f"'{filename}' is not a valid PDF.")
 
     text = extract_pdf_text(pdf_bytes)
     if not text.strip():
         raise ValueError(f"Could not extract text from '{filename}'.")
+    logger.info("[bulk] PDF text extracted: %d chars — %s", len(text), filename)
 
     resume_data = parse_resume(text)
+    logger.info("[bulk] LLM parse OK: name=%r, skills=%d, exp=%d — %s", resume_data.name, len(resume_data.skills), len(resume_data.experience), filename)
 
     if not any([resume_data.name, resume_data.email, resume_data.skills, resume_data.experience]):
         raise ValueError(f"LLM could not extract usable data from '{filename}'.")
@@ -616,13 +635,17 @@ def ingest(
     missing_links: list[str] = []
 
     if resume:
+        logger.info("[ingest] Resume upload: %s", resume.filename)
         content = resume.file.read()
         if content[:4] != b"%PDF":
             raise HTTPException(status_code=400, detail=f"'{resume.filename}' is not a valid PDF.")
         text = extract_pdf_text(content)
+        logger.info("[ingest] PDF text extracted: %d chars", len(text))
         try:
             resume_data = parse_resume(text)
+            logger.info("[ingest] LLM parse OK: name=%r, email=%r, skills=%d, exp=%d", resume_data.name, resume_data.email, len(resume_data.skills), len(resume_data.experience))
         except Exception as exc:
+            logger.error("[ingest] LLM parse failed: %s", exc)
             if not linkedin_url and not github_username:
                 raise HTTPException(
                     status_code=422,
@@ -634,11 +657,13 @@ def ingest(
             if not linkedin_url:
                 if resume_data.linkedin_url:
                     linkedin_url = resume_data.linkedin_url
+                    logger.info("[ingest] LinkedIn URL from resume: %s", linkedin_url)
                 else:
                     missing_links.append("linkedin_url")
             if not github_username:
                 if resume_data.github_username:
                     github_username = resume_data.github_username
+                    logger.info("[ingest] GitHub username from resume: %s", github_username)
                 else:
                     missing_links.append("github_username")
 

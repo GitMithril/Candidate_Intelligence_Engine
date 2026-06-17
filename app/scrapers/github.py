@@ -10,6 +10,7 @@ Required env var: GITHUB_TOKEN (personal access token, classic or fine-grained)
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import time
 from collections import defaultdict
@@ -22,6 +23,8 @@ from dotenv import load_dotenv
 from ..schemas import GitHubProfile, GitHubRepo, LanguageStats
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 _API = "https://api.github.com"
 _GQL = "https://api.github.com/graphql"
@@ -207,11 +210,14 @@ def scrape_github(username: str) -> GitHubProfile:
     """
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
+        logger.error("[github] GITHUB_TOKEN is not set")
         raise ValueError("GITHUB_TOKEN environment variable not set")
 
+    logger.info("[github] Scraping: %s", username)
     s = _session(token)
 
     user: dict = _get(s, f"{_API}/users/{username}")
+    logger.info("[github] User fetched: %s (name=%r, public_repos=%s)", username, user.get("name"), user.get("public_repos"))
 
     repos = _paginate(
         s, f"{_API}/users/{username}/repos", {"type": "owner", "sort": "pushed"}
@@ -220,6 +226,7 @@ def scrape_github(username: str) -> GitHubProfile:
     # Exclude forks: language bytes and most-starred should reflect the
     # candidate's own code, not code from upstream projects they forked.
     own_repos = [r for r in repos if not r.get("fork")]
+    logger.info("[github] Repos: total=%d own=%d", len(repos), len(own_repos))
 
     most_starred_raw = max(
         own_repos, key=lambda r: r.get("stargazers_count", 0), default=None
@@ -234,18 +241,24 @@ def scrape_github(username: str) -> GitHubProfile:
             url=most_starred_raw["html_url"],
             primary_language=most_starred_raw.get("language"),
         )
+        logger.info("[github] Most starred repo: %s (%d stars)", most_starred_raw["name"], most_starred_raw.get("stargazers_count", 0))
         readme = _fetch_readme(s, most_starred_raw["full_name"])
 
     top_langs = _fetch_language_stats(s, own_repos)
+    logger.info("[github] Top languages: %s", [l.name for l in top_langs[:5]])
 
     try:
         pinned = _fetch_pinned_repos(s, username)
-    except Exception:
+        logger.info("[github] Pinned repos: %d", len(pinned))
+    except Exception as exc:
+        logger.warning("[github] Pinned repos failed: %s", exc)
         pinned = []
 
     try:
         total_contributions = _fetch_contributions(s, username)
-    except Exception:
+        logger.info("[github] Contributions (90d): %d", total_contributions)
+    except Exception as exc:
+        logger.warning("[github] Contributions failed: %s", exc)
         total_contributions = 0
 
     return GitHubProfile(

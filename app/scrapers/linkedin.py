@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -25,6 +26,8 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from ..schemas import EducationEntry, ExperienceEntry, LinkedInProfile
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 _BASE = "https://www.linkedin.com"
 _LOGIN = f"{_BASE}/login"
@@ -99,26 +102,30 @@ async def _authenticate(context: BrowserContext, page: Page) -> Optional[str]:
     """
     li_at = os.environ.get("LINKEDIN_LI_AT")
     if li_at:
+        logger.info("[linkedin] Auth: injecting li_at cookie")
         await _inject_cookie(context, li_at)
         return None
 
     email = os.environ.get("LINKEDIN_EMAIL")
     password = os.environ.get("LINKEDIN_PASSWORD")
     if not email or not password:
+        logger.error("[linkedin] Auth: no credentials configured (LINKEDIN_LI_AT or LINKEDIN_EMAIL+PASSWORD missing)")
         return (
             "No auth configured. Set LINKEDIN_LI_AT (preferred) or "
             "both LINKEDIN_EMAIL and LINKEDIN_PASSWORD in .env"
         )
 
+    logger.info("[linkedin] Auth: attempting email/password login")
     fresh = await _login(page, email, password)
     if not fresh:
+        logger.warning("[linkedin] Auth: email/password login blocked (CAPTCHA or 2FA)")
         return (
             "Email/password login failed — blocked by CAPTCHA or 2FA. "
             "Log in manually, extract li_at from browser cookies, "
             "and set LINKEDIN_LI_AT in .env (see setup_env.md)."
         )
 
-    # Print so the user can persist it without re-logging in every run.
+    logger.info("[linkedin] Auth: email/password login OK, new li_at obtained")
     print(f"Login OK. Save to .env: LINKEDIN_LI_AT={fresh}", file=sys.stderr)
     return None
 
@@ -590,6 +597,7 @@ async def _scrape_skills_page(page: Page, profile_url: str) -> list[str]:
 # ── Orchestration ──────────────────────────────────────────────────────────────
 
 async def _scrape(profile_url: str) -> LinkedInProfile:
+    logger.info("[linkedin] Scraping: %s", profile_url)
     async with async_playwright() as p:
         browser, context = await _launch(p)
         page = await context.new_page()
@@ -600,13 +608,16 @@ async def _scrape(profile_url: str) -> LinkedInProfile:
             # If using email/password, _authenticate navigates to /login first.
             auth_err = await _authenticate(context, page)
             if auth_err:
+                logger.error("[linkedin] Auth failed: %s", auth_err)
                 return LinkedInProfile(warning=auth_err)
 
             # Step 1: navigate and wait for initial render (top card in viewport).
+            logger.info("[linkedin] Navigating to profile page")
             await _navigate_profile(page, profile_url)
 
             blocked = _detect_block(page.url, await page.title())
             if blocked:
+                logger.warning("[linkedin] Blocked: %s", blocked)
                 return LinkedInProfile(warning=blocked)
 
             ld = await _jsonld(page)
@@ -615,10 +626,13 @@ async def _scrape(profile_url: str) -> LinkedInProfile:
             name = headline = location = None
             try:
                 name, headline, location = await _top_card(page, ld)
+                logger.info("[linkedin] Top card: name=%r, headline=%r, location=%r", name, headline, location)
             except Exception as e:
+                logger.warning("[linkedin] Top card extraction failed: %s", e)
                 warnings.append(f"top_card: {e}")
 
             # Step 3: scroll to trigger lazy section loading, then extract.
+            logger.info("[linkedin] Scrolling to load sections")
             await _scroll_sections(page)
 
             exp: list[ExperienceEntry] = []
@@ -626,17 +640,23 @@ async def _scrape(profile_url: str) -> LinkedInProfile:
             sk: list[str] = []
             try:
                 exp, edu, _ = await _extract_sections(page)
+                logger.info("[linkedin] Sections extracted: exp=%d, edu=%d", len(exp), len(edu))
             except Exception as e:
+                logger.warning("[linkedin] Section extraction failed: %s", e)
                 warnings.append(f"sections: {e}")
             try:
                 sk = await _scrape_skills_page(page, profile_url)
+                logger.info("[linkedin] Skills page: %d skills", len(sk))
             except Exception as e:
+                logger.warning("[linkedin] Skills page failed: %s", e)
                 warnings.append(f"skills: {e}")
 
             if not exp and not edu and not sk:
-                warnings.append(await _diagnostic(page))
+                diag = await _diagnostic(page)
+                logger.warning("[linkedin] All sections empty — %s", diag)
+                warnings.append(diag)
 
-            return LinkedInProfile(
+            result = LinkedInProfile(
                 name=name,
                 headline=headline,
                 current_role=exp[0].title if exp else None,
@@ -647,8 +667,11 @@ async def _scrape(profile_url: str) -> LinkedInProfile:
                 skills=sk,
                 warning="; ".join(warnings) or None,
             )
+            logger.info("[linkedin] Done: name=%r, exp=%d, edu=%d, skills=%d, warning=%r", result.name, len(result.experience), len(result.education), len(result.skills), result.warning)
+            return result
 
         except Exception as e:
+            logger.error("[linkedin] Scraping crashed: %s", e)
             return LinkedInProfile(warning=f"Scraping failed: {e}")
         finally:
             await browser.close()
