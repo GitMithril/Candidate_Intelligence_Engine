@@ -43,6 +43,9 @@ async def _launch(playwright) -> tuple[Browser, BrowserContext]:
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--disable-setuid-sandbox",
         ],
     )
     context = await browser.new_context(
