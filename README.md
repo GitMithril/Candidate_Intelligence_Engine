@@ -1,10 +1,11 @@
 # Candidate Intelligence System
 
-A backend system that aggregates professional data from GitHub and LinkedIn, builds unified candidate profiles, generates semantic vector embeddings, and exposes a search API that ranks candidates by relevance to a plain-English query.
+A full-stack recruitment intelligence platform. Aggregates professional data from GitHub and LinkedIn, builds unified candidate profiles from resumes or scraped data, generates semantic vector embeddings, and exposes a search API and RAG chatbot that lets recruiters query the candidate database in plain English.
 
-**Built for:** Salik Labs Remote Internship - Week 1 Project  
+**Built for:** Salik Labs Remote Internship  
 **Live API:** `https://candidateintelligenceengine-production.up.railway.app`  
-**API Docs:** `https://candidateintelligenceengine-production.up.railway.app/docs`
+**API Docs:** `https://candidateintelligenceengine-production.up.railway.app/docs`  
+**Frontend:** `https://candidate-intelligence-engine.vercel.app`
 
 ---
 
@@ -13,13 +14,17 @@ A backend system that aggregates professional data from GitHub and LinkedIn, bui
 | Layer | Technology |
 |---|---|
 | API | FastAPI + Uvicorn |
-| Database | MongoDB (local) / MongoDB Atlas (production) |
+| Database | MongoDB (local Docker) / MongoDB Atlas (production) |
 | Vector DB | Pinecone (`all-MiniLM-L6-v2`, 384 dims, cosine) |
-| Cache | Redis (local) / Upstash Redis REST (production) |
+| Cache | Redis (local Docker) / Upstash Redis REST (production) |
 | Scraping | Playwright (LinkedIn) + GitHub REST & GraphQL API |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` |
+| LLM | `google/gemma-4-31b-it:free` via OpenRouter (LangChain) |
+| PDF parsing | `pypdf` |
+| Drive download | `gdown >= 5.0` |
 | Containerisation | Docker + Docker Compose |
-| Deployment | Railway |
+| Deployment | Railway (API) + Vercel (frontend) |
+| Frontend | React 19 + Vite + TypeScript + Tailwind CSS v4 |
 
 ---
 
@@ -28,15 +33,33 @@ A backend system that aggregates professional data from GitHub and LinkedIn, bui
 ```
 ├── app/
 │   ├── scrapers/
-│   │   ├── github.py        # GitHub REST + GraphQL scraper
-│   │   └── linkedin.py      # Playwright-based LinkedIn scraper
-│   ├── schemas.py           # All Pydantic models
-│   ├── embeddings.py        # Sentence-transformer + Pinecone logic
-│   └── main.py              # FastAPI app and all endpoints
-├── scrape_and_store.py      # CLI: scrape → store → embed in one command
-├── embed_all.py             # Batch embed all MongoDB profiles to Pinecone
-├── docker-compose.yml       # Local dev: API + MongoDB + Redis
-├── Dockerfile               # Production image
+│   │   ├── github.py            # GitHub REST + GraphQL scraper
+│   │   └── linkedin.py          # Playwright-based LinkedIn scraper
+│   ├── utils/
+│   │   ├── chat.py              # Query classification + LLM answer generation
+│   │   ├── drive.py             # Google Drive folder download (gdown)
+│   │   ├── llm.py               # Resume parsing via LLM
+│   │   └── pdf.py               # PDF text + hyperlink extraction
+│   ├── schemas.py               # All Pydantic models
+│   ├── embeddings.py            # Sentence-transformer + Pinecone logic
+│   └── main.py                  # FastAPI app and all endpoints
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ui/              # Reusable UI primitives
+│   │   │   ├── search/          # SearchPanel, ChatPanel
+│   │   │   ├── upload/          # SingleUpload, BulkImport
+│   │   │   ├── Layout.tsx       # Sidebar and nav
+│   │   │   └── ProfileModal.tsx # Full candidate profile dialog
+│   │   ├── api.ts               # Typed axios + fetch client
+│   │   ├── App.tsx              # Root component and view routing
+│   │   └── index.css            # Tailwind v4 + CSS variables
+│   ├── .env                     # VITE_API_URL (not committed)
+│   └── package.json
+├── scrape_and_store.py          # CLI: scrape → store → embed in one command
+├── embed_all.py                 # Batch embed all MongoDB profiles to Pinecone
+├── docker-compose.yml           # Local dev: API + MongoDB + Redis
+├── Dockerfile                   # Production image
 └── requirements.txt
 ```
 
@@ -50,13 +73,12 @@ Create a `.env` file in the project root:
 # GitHub
 GITHUB_TOKEN=ghp_...
 
-# API URL (Defaults to local deployment, set to production to update production)
-API_URL=https://candidateintelligenceengine-production.up.railway.app
-
 # LinkedIn (extract li_at cookie after logging in manually)
 LINKEDIN_LI_AT=AQE...
+LINKEDIN_EMAIL=you@email.com
+LINKEDIN_PASSWORD=yourpassword
 
-# MongoDB (only needed if running scripts outside Docker against Atlas)
+# MongoDB
 MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/candidate_intelligence
 
 # Pinecone
@@ -66,20 +88,23 @@ PINECONE_INDEX=candidate-intelligence
 # Upstash Redis (production)
 UPSTASH_REDIS_REST_URL=https://...upstash.io
 UPSTASH_REDIS_REST_TOKEN=...
+
+# OpenRouter (LLM for resume parsing + RAG chat)
+OPENROUTER_API_KEY=sk-or-...
 ```
 
-> `GITHUB_TOKEN` and `LINKEDIN_LI_AT` are only used by the local scraper scripts. They are not needed on Railway.
+> `GITHUB_TOKEN`, `LINKEDIN_*` are only used by local scraper scripts — not needed on Railway.
 
 ---
 
-## Setup — Cold Clone (Local Development)
+## Setup — Local Development
 
 Everything runs locally using Docker for the API, MongoDB, and Redis.
 
 ### Prerequisites
 - Docker Desktop
 - Python 3.11+
-- Git
+- Node.js 18+
 
 ### Steps
 
@@ -96,24 +121,38 @@ python -m venv .venv
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Install Playwright browser (one-time)
+# 4. Install Playwright browser (one-time, for LinkedIn scraping)
 playwright install chromium
 
-# 5. Copy and fill in your environment variables
-# Create .env from the template above
+# 5. Create .env from the template above
 
 # 6. Start the API, MongoDB, and Redis containers
-docker compose up -d
+docker compose up --build -d
 
-# 7. Confirm the API is running
-# Open http://localhost:8000/docs
+# 7. Start the frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-### Scrape and store a candidate profile
+- API: `http://localhost:8000` / Swagger UI: `http://localhost:8000/docs`
+- Frontend: `http://localhost:5173`
+
+### Data routing when running locally
+
+| Service | Where data goes | Why |
+|---|---|---|
+| MongoDB | **Local container** | `docker-compose.yml` overrides `MONGODB_URI` to the local container |
+| Redis | **Upstash (cloud)** | Upstash credentials from `.env` are checked first in the Redis initialiser |
+| Pinecone | **Cloud** | No local alternative — uses the same index as production |
+
+If you want fully isolated local data, comment out `UPSTASH_REDIS_REST_URL` in `.env` (falls back to local Redis) and use a separate Pinecone index (e.g. `candidate-intelligence-dev`).
+
+### Scrape and store a candidate
 
 ```powershell
-# Scrape GitHub + LinkedIn, store in MongoDB, embed in Pinecone — all in one command
-python scrape_and_store.py --github <github-username> --linkedin https://linkedin.com/in/<slug>
+# GitHub + LinkedIn
+python scrape_and_store.py --github <username> --linkedin https://linkedin.com/in/<slug>
 
 # GitHub only
 python scrape_and_store.py --github torvalds
@@ -122,7 +161,7 @@ python scrape_and_store.py --github torvalds
 python scrape_and_store.py --linkedin https://linkedin.com/in/williamhgates
 ```
 
-### Embed all existing profiles (batch)
+### Batch embed all existing profiles
 
 ```powershell
 python embed_all.py
@@ -132,66 +171,55 @@ python embed_all.py
 
 ## Setup — Production Testing (Cloud Services Locally)
 
-Use this when you want to test against real Atlas, Upstash, and Pinecone without deploying to Railway.
-
 ```powershell
 # 1. Activate venv
 .venv\Scripts\activate
 
-# 2. Ensure .env has your Atlas MONGODB_URI, Upstash, and Pinecone credentials
+# 2. Ensure .env has Atlas MONGODB_URI, Upstash, and Pinecone credentials
 
 # 3. Run the API directly (reads .env, bypasses docker-compose overrides)
 uvicorn app.main:app --reload
-
-# 4. In a second terminal — scrape and store
-python scrape_and_store.py --github <username> --linkedin <url>
 ```
 
-Verify each service received data:
-
-| Service | Where to check |
-|---|---|
-| MongoDB | Atlas dashboard → Collections → `candidate_intelligence.profiles` |
-| Pinecone | Pinecone dashboard → your index → vector count |
-| Redis | Run the same search query twice — second response returns `"cached": true` |
+All three services (MongoDB Atlas, Upstash, Pinecone) receive data directly.
 
 ---
 
 ## API Reference
 
-Interactive docs available at `/docs` (Swagger UI) and `/redoc`.
+Interactive docs at `/docs` (Swagger UI) and `/redoc`.
+
+---
 
 ### `POST /profiles`
-Insert or upsert a candidate profile. If a profile for the same GitHub username or LinkedIn URL already exists it is replaced with fresh data.
+Insert or upsert a candidate profile. Replaced if the same GitHub username or LinkedIn URL already exists.
 
 **Request body:**
 ```json
 {
   "github_username": "torvalds",
-  "github_profile": { ... },
+  "github_profile": { "..." },
   "linkedin_url": "https://linkedin.com/in/...",
-  "linkedin_profile": { ... }
+  "linkedin_profile": { "..." }
 }
 ```
-
 At least one of `github_username` or `linkedin_url` is required.
 
-**Response:** `201 Created` — the stored profile with its MongoDB `id`.
+**Response:** `201 Created` — stored profile with MongoDB `id`.
 
 ---
 
 ### `GET /profiles/{id}`
-Fetch a single profile by its MongoDB ObjectId string.
+Fetch a single profile by MongoDB ObjectId.
 
-**Response:** `200 OK` — full candidate profile document.  
-**Errors:** `400` malformed id, `404` not found.
+**Errors:** `400` malformed id · `404` not found.
 
 ---
 
 ### `POST /profiles/{id}/embed`
-Generate a 384-dim vector embedding for the profile and upsert it to Pinecone. Called automatically by `scrape_and_store.py` after storing.
+Generate and upsert a 384-dim vector to Pinecone for the given profile.
 
-**Response:** `200 OK`
+**Response:**
 ```json
 { "id": "...", "embedded": true }
 ```
@@ -199,442 +227,241 @@ Generate a 384-dim vector embedding for the profile and upsert it to Pinecone. C
 ---
 
 ### `GET /search`
-Semantic search over all embedded profiles. Embeds the query, queries Pinecone for nearest vectors, fetches full documents from MongoDB, and returns results ranked by similarity score. Repeated queries are served from Redis cache (5-minute TTL).
+Semantic search over all embedded profiles. Embeds the query with `all-MiniLM-L6-v2`, retrieves nearest vectors from Pinecone, fetches full documents from MongoDB, and applies optional hard filters. Results are Redis-cached for 5 minutes.
 
 **Query parameters:**
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `q` | string | required | Plain-English search query |
-| `skills` | string | — | Comma-separated required skills (profile must have all) |
+| `skills` | string | — | Comma-separated skills (profile must have **all**) |
 | `location` | string | — | Location substring filter (case-insensitive) |
 | `k` | integer | 10 | Number of results (max 50) |
 
-**Response:** `200 OK`
+**Response:**
 ```json
 {
   "query": "Python backend developer",
-  "results": [
-    {
-      "score": 0.87,
-      "profile": { ... }
-    }
-  ],
+  "results": [{ "score": 0.87, "profile": { "..." } }],
   "cached": false
 }
 ```
 
 ---
 
-## Schema Documentation
+### `POST /scrape`
+Trigger a live GitHub and/or LinkedIn scrape, store, and embed in one call.
 
-### CandidateProfile (unified document stored in MongoDB)
-
-| Field | Type | Source | Description |
-|---|---|---|---|
-| `id` | `string` | MongoDB | 24-character hex ObjectId |
-| `scraped_at` | `string` (ISO 8601) | System | Timestamp of last scrape |
-| `source_urls.github` | `string \| null` | — | GitHub profile URL |
-| `source_urls.linkedin` | `string \| null` | — | LinkedIn profile URL |
-| `name` | `string \| null` | LinkedIn → GitHub | Display name |
-| `headline` | `string \| null` | LinkedIn | Profile headline |
-| `current_role` | `string \| null` | LinkedIn → GitHub | Current job title |
-| `current_company` | `string \| null` | LinkedIn → GitHub | Current employer |
-| `location` | `string \| null` | LinkedIn → GitHub | Location string |
-| `experience` | `ExperienceEntry[]` | LinkedIn | Work history |
-| `education` | `EducationEntry[]` | LinkedIn | Education history |
-| `skills` | `string[]` | LinkedIn | Skill list |
-| `linkedin_warning` | `string \| null` | LinkedIn | Set if scraper was partially blocked |
-| `github_username` | `string \| null` | GitHub | GitHub login |
-| `github_bio` | `string \| null` | GitHub | GitHub bio |
-| `github_company` | `string \| null` | GitHub | Company from GitHub profile |
-| `github_email` | `string \| null` | GitHub | Public email on GitHub |
-| `github_avatar_url` | `string \| null` | GitHub | Avatar image URL |
-| `github_blog` | `string \| null` | GitHub | Blog/website URL |
-| `public_repos` | `int` | GitHub | Number of public repositories |
-| `followers` | `int` | GitHub | GitHub follower count |
-| `following` | `int` | GitHub | GitHub following count |
-| `github_created_at` | `string \| null` | GitHub | Account creation date (ISO 8601) |
-| `top_languages` | `LanguageStats[]` | GitHub | Languages ranked by repo count and bytes |
-| `pinned_repos` | `GitHubRepo[]` | GitHub | Up to 6 pinned repositories |
-| `total_contributions_90d` | `int` | GitHub | Contribution count over last 90 days |
-| `most_starred_repo` | `GitHubRepo \| null` | GitHub | Highest-starred owned repo |
-| `most_starred_repo_readme` | `string \| null` | GitHub | README content of most-starred repo |
-
-### Sub-types
-
-**ExperienceEntry**
-```
-title: string | null
-company: string | null
-duration: string | null
-location: string | null
-description: string | null
+**Request body:**
+```json
+{ "github_username": "torvalds", "linkedin_url": "https://linkedin.com/in/..." }
 ```
 
-**EducationEntry**
-```
-school: string | null
-degree: string | null
-field: string | null
-dates: string | null
-```
-
-**GitHubRepo**
-```
-name: string
-description: string | null
-stars: int
-url: string
-primary_language: string | null
-```
-
-**LanguageStats**
-```
-name: string
-repo_count: int
-bytes: int
-```
+**Response:** `201 Created` — the scraped, stored, and embedded profile.
 
 ---
-
-## Test Search Queries
-
-All queries below were run against a dataset of real scraped profiles.
-
----
-
-### Query 1: Location + Skill Filter
-
-Find candidates from NUST Islamabad with Applied Machine Learning experience.
-
-```
-GET /search?q=NUST%2C%20Islamabad&skills=Applied%20Machine%20Learning&k=3
-```
-
-**Expected behaviour:** Only candidates with `Applied Machine Learning` in their skills list are returned, regardless of semantic similarity score.
-
-**Result:**
-> 1 result returned. Abdullah Ejaz at similarity score **0.29** — the only candidate in the dataset with `Applied Machine Learning` listed as a skill. Score is lower because the query targets location rather than a skill description, but the filter ensures correctness.
-
----
-
-### Query 2: Semantic Role Match
-
-Find candidates who fit a Product Developer profile.
-
-```
-GET /search?q=Product%20Developer&k=3
-```
-
-**Expected behaviour:** Profiles are ranked purely by semantic similarity to the query. No filters applied.
-
-**Results:**
-
-| Rank | Candidate | Score | Reason |
-|---|---|---|---|
-| 1 | Faizan Anwar | 0.51 | Headline: *Product Developer @ Particula Tech* |
-| 2 | Muhammad Riyan Aslam | 0.43 | Current role: *Lead Product Engineer* |
-| 3 | Abdullah Ejaz | 0.41 | No product-related information in embedded metadata |
-
----
-
-### Query 3: Multi-filter: Role + Skill + Location
-
-Find Full Stack Developers in Islamabad who know FastAPI.
-
-```
-GET /search?q=Full%20Stack%20Dev&skills=FastAPI&location=Islam%C4%81b%C4%81d&k=3
-```
-
-**Expected behaviour:** Results must have `FastAPI` in skills and `Islamabad` in location field. Query semantics rank by full-stack relevance.
-
-**Results:**
-
-| Rank | Candidate | Score | Reason |
-|---|---|---|---|
-| 1 | Abdullah Naeem | 0.57 | Full Stack Dev @ Salik Labs, has FastAPI, located in Islamabad |
-| 2 | Muhammad Riyan Aslam | 0.40 | Has FastAPI in skills, located in Islamabad |
-
-> No further results — only 2 candidates in the dataset matched both the `FastAPI` skill and `Islamabad` location filters.
-
----
-
-## Deployment
-
-### Railway (Production)
-
-1. Push this repository to GitHub
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub repo
-3. Select this repository — Railway auto-detects the `Dockerfile`
-4. Go to **Variables** and add:
-
-```
-MONGODB_URI              = mongodb+srv://...
-UPSTASH_REDIS_REST_URL   = https://...upstash.io
-UPSTASH_REDIS_REST_TOKEN = ...
-PINECONE_API_KEY         = ...
-PINECONE_INDEX           = candidate-intelligence
-```
-
-5. Railway builds and deploys automatically. The first build is slow (~5–10 min) because the `Dockerfile` pre-downloads the `all-MiniLM-L6-v2` model at build time.
-
-Once deployed, scrape profiles against the live URL:
-```powershell
-python scrape_and_store.py --github <username> --linkedin <url> --api https://your-app.up.railway.app
-```
-
-**Live URL:** `https://<your-railway-url>.up.railway.app` *(update after first deploy)*
-
----
-
-## Deployment Postmortem
-
-**What broke:** The LinkedIn scraper was by far the most time-consuming component to get right, taking several hours of debugging across multiple layers.
-
-LinkedIn's bot protection sometimes would block access from a headless browser so i landed on using the browser headful to avoid any problems at all, This was just a start. The deeper problem was LinkedIn's DOM structure: class names are dynamically hashed on every page load, sections are lazy-loaded via IntersectionObserver (meaning a single `scrollTo` call lands at the bottom of the currently-rendered page, not the final one), and deeply nested divs make any CSS-selector-based approach brittle.
-
-Skills were the worst offender. The skills section sits at the very bottom of the profile page and wouldn't render until scrolled to but even after scrolling, the skills array kept coming back empty. The fix was to navigate to LinkedIn's dedicated `/details/skills/` sub-page instead, scroll it incrementally using `page.mouse.wheel` (which fires the scroll events LinkedIn's IntersectionObserver actually listens to, unlike `window.scrollTo`), and extract text from `<p>` tags directly since class names couldn't be relied upon.
-
-That still left noise in the output like navbar items, ad feedback strings, and skill proof entries (e.g. "Software Intern at Mezino Technologies" appearing alongside the actual skill name) all came through in the raw extraction. Each required its own filter: a NOISE regex for UI boilerplate and ad copy, an "at Company" pattern for proof entries, and keyword filters for institution names bleeding in from education data.
-
----
-
-# Part 2: Bulk Ingestion, RAG Chatbot, and Frontend
-
-**Built for:** Salik Labs Remote Internship - Week 2  
-**Frontend:** `http://localhost:5173` (Vite dev server)
-
----
-
-## What Was Added
-
-| Area | What changed |
-|---|---|
-| Ingestion | `POST /ingest` (single PDF resume via form upload) |
-| Ingestion | `POST /ingest/bulk` (multiple PDFs or a Google Drive folder, async background job) |
-| Ingestion | `GET /ingest/bulk/{job_id}` (poll bulk job status) |
-| Chat | `POST /chat` (RAG over candidate database, session-aware) |
-| Chat | `DELETE /chat/{session_id}` (clear chat history) |
-| Utils | `app/utils/chat.py` (LLM answer generation via OpenRouter) |
-| Utils | `app/utils/drive.py` (Google Drive folder download via gdown) |
-| Frontend | React 19 + Vite 8 + TypeScript 6 + Tailwind v4 SPA |
-
----
-
-## New API Endpoints
 
 ### `POST /ingest`
-
-Accepts a resume PDF (and optionally a LinkedIn URL and GitHub username) as a multipart form upload. Extracts text from the PDF using `pypdf`, passes it to the LLM to parse structured profile fields, then scrapes any provided social links and merges all sources into one profile stored in MongoDB and embedded in Pinecone.
+Accept a resume PDF (and optionally a LinkedIn URL and GitHub username). Extracts text from the PDF, parses structured fields via LLM, scrapes any provided social links, merges all sources, stores in MongoDB, and embeds in Pinecone.
 
 **Form fields:**
 
-| Field | Type | Required |
+| Field | Type | Notes |
 |---|---|---|
-| `resume` | file (PDF) | at least one of the three |
+| `resume` | file (PDF) | At least one of the three is required |
 | `linkedin_url` | string | optional |
 | `github_username` | string | optional |
 
-**Response:** `200 OK` - the merged candidate profile.
+**Response:** `201 Created` — merged profile + `missing_links` array for any URLs not found in the resume.
 
 ---
 
 ### `POST /ingest/bulk`
-
-Accepts up to 100 PDF files and/or a Google Drive folder URL containing PDFs. Processing runs in the background. Returns a job ID immediately so the caller can poll for progress.
-
-ZIP archives are also accepted and are extracted server-side. Non-PDF files inside a ZIP are recorded as per-file errors without failing the whole job.
+Accept multiple PDFs, ZIP archives, and/or a public Google Drive folder URL. Processing runs in the background; returns a job ID to poll.
 
 **Form fields:**
 
 | Field | Type | Description |
 |---|---|---|
 | `files` | file[] | PDF or ZIP files |
-| `drive_folder_url` | string | Google Drive folder URL (public or shared) |
+| `drive_url` | string | Public Google Drive folder URL |
 
 **Response:** `202 Accepted`
 ```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued",
-  "total": 12
-}
+{ "job_id": "550e8400-...", "status": "pending", "total": 12 }
 ```
 
 ---
 
 ### `GET /ingest/bulk/{job_id}`
+Poll the status of a bulk ingestion job.
 
-Poll the status of a bulk ingestion job started with `POST /ingest/bulk`.
-
-**Response:** `200 OK`
+**Response:**
 ```json
 {
   "job_id": "...",
-  "status": "processing",
+  "status": "running",
   "total": 12,
-  "done": 7,
-  "errors": [
-    { "filename": "corrupted.pdf", "error": "not a valid PDF" }
-  ]
+  "processed": 7,
+  "failed": 1,
+  "errors": [{ "file": "corrupted.pdf", "error": "not a valid PDF" }]
 }
 ```
 
-`status` is one of `queued`, `processing`, `done`, or `error`.
+`status` is one of `pending` → `running` → `complete`.
 
 ---
 
 ### `POST /chat`
-
-RAG endpoint. Embeds the question, queries Pinecone for the top 5 most relevant candidate vectors, fetches full profiles from MongoDB, and sends them to the LLM (Gemma 4 31B via OpenRouter) as grounded context. The LLM is instructed to answer only from the injected profiles and cite candidates by name.
-
-Chat history is kept in Redis (TTL: 24 hours) and the last 10 turns are injected into each LLM call. Sessions are identified by a UUID returned on the first request and passed back by the client on subsequent requests.
+Non-streaming RAG chat. Classifies the query, fetches candidates (via vector search or MongoDB filter), then either generates an LLM answer (semantic/irrelevant queries) or returns a template response (filter queries). See `/chat/stream` for the real-time streaming variant.
 
 **Request body:**
 ```json
-{
-  "question": "Who are the strongest Python developers?",
-  "session_id": null
-}
+{ "question": "Who are the strongest Python developers?", "session_id": null }
 ```
 
-**Response:** `200 OK`
+**Response:**
 ```json
 {
   "session_id": "550e8400-...",
   "answer": "Based on the candidates in your database, **Abdullah Naeem** stands out...",
   "citations": [
-    { "id": "...", "name": "Abdullah Naeem", "score": 0.91 }
+    { "id": "...", "name": "Abdullah Naeem", "score": 0.91, "source": "semantic" }
   ]
 }
 ```
 
+`citations[].source` is `"semantic"` (vector search result) or `"filter"` (MongoDB exact match).
+
+---
+
+### `POST /chat/stream`
+Streaming variant of `POST /chat`. Returns `text/event-stream` (SSE). The frontend uses this endpoint for real-time token-by-token output.
+
+**Request body:** Same as `POST /chat`.
+
+**Event sequence:**
+```
+data: {"type": "stage",  "text": "Classifying query…"}
+data: {"type": "stage",  "text": "Searching database…"}
+data: {"type": "meta",   "session_id": "…", "citations": […]}
+data: {"type": "stage",  "text": "Generating answer…"}   ← omitted for filter queries
+data: {"type": "token",  "text": "<chunk>"}              ← many; one per LLM token
+data: {"type": "done"}
+```
+
+Filter queries skip the LLM entirely — after `meta`, a single `token` event carries the template response and `done` follows immediately.
+
+On error: `{"type": "error", "text": "…"}`
+
 ---
 
 ### `DELETE /chat/{session_id}`
-
-Clears the chat history for a session from Redis. Returns `204 No Content`.
-
----
-
-## New Stack Additions
-
-| Layer | Technology |
-|---|---|
-| LLM | `google/gemma-4-31b-it:free` via OpenRouter (LangChain ChatOpenAI) |
-| PDF parsing | `pypdf` |
-| Drive download | `gdown >= 5.0` |
-| Frontend framework | React 19 + Vite 8 + TypeScript 6 |
-| Styling | Tailwind CSS v4 (CSS-first config via `@import "tailwindcss"`) |
-| UI primitives | Radix UI (Dialog, Progress, Tabs, Label) |
-| Markdown | `react-markdown` + `remark-gfm` |
+Clear all conversation history for a session from Redis. Returns `204 No Content`.
 
 ---
 
-## New Environment Variables
+## Chat — Query Routing
 
-Add these to your `.env` file (backend):
+Every chat message is first classified by a zero-temperature LLM call into one of three types:
 
-```env
-# OpenRouter (for LLM-based PDF parsing and RAG chat)
-OPENROUTER_API_KEY=sk-or-...
-```
+| Type | When | Retrieval | LLM answer |
+|---|---|---|---|
+| `irrelevant` | Greetings, general knowledge, off-topic | None | Polite decline |
+| `semantic` | Role / concept searches ("compare backend engineers") | Pinecone vector search · `top_k=10` targeted, `top_k=30` broad | Full LLM synthesis |
+| `filter` | Concrete criteria ("list all from Islamabad", "how many know Python?") | MongoDB regex filter · up to 30 results | Template only — no LLM |
+
+**Why filter queries skip the LLM:** MongoDB is the exact source of truth for concrete matches. Feeding the results back to the LLM to re-count or re-list them adds latency, burns rate-limit quota, and introduces a chance of mis-counting. The profile chips in the chat UI carry all the detail the recruiter needs.
+
+---
+
+## Schema Documentation
+
+### CandidateProfile
+
+| Field | Type | Source |
+|---|---|---|
+| `id` | `string` | MongoDB ObjectId |
+| `scraped_at` | `string` (ISO 8601) | System |
+| `source_urls.github` | `string \| null` | — |
+| `source_urls.linkedin` | `string \| null` | — |
+| `name` | `string \| null` | LinkedIn → GitHub |
+| `headline` | `string \| null` | LinkedIn |
+| `current_role` | `string \| null` | LinkedIn → GitHub |
+| `current_company` | `string \| null` | LinkedIn → GitHub |
+| `location` | `string \| null` | Resume → LinkedIn → GitHub |
+| `experience` | `ExperienceEntry[]` | LinkedIn / Resume |
+| `education` | `EducationEntry[]` | LinkedIn / Resume |
+| `skills` | `string[]` | LinkedIn / Resume |
+| `github_username` | `string \| null` | GitHub / Resume |
+| `github_bio` | `string \| null` | GitHub |
+| `github_email` | `string \| null` | GitHub |
+| `github_avatar_url` | `string \| null` | GitHub |
+| `public_repos` | `int` | GitHub |
+| `followers` | `int` | GitHub |
+| `top_languages` | `LanguageStats[]` | GitHub |
+| `pinned_repos` | `GitHubRepo[]` | GitHub |
+| `total_contributions_90d` | `int` | GitHub |
+| `most_starred_repo` | `GitHubRepo \| null` | GitHub |
+| `most_starred_repo_readme` | `string \| null` | GitHub |
 
 ---
 
 ## Frontend
 
-The frontend is a single-page React app located in the `frontend/` directory. It has three views accessible from the left sidebar.
+A single-page React app in the `frontend/` directory with three views.
 
-### Views
+**Single Upload** — Upload one PDF resume with optional LinkedIn URL and GitHub username. Displays the merged profile on success.
 
-**Single Upload** - Upload one PDF resume with optional LinkedIn URL and GitHub username. Displays the resulting merged profile on success.
+**Bulk Import** — Upload multiple PDFs, ZIP archives, or paste a Google Drive folder link. Live progress bar polls the job status endpoint every 2 seconds.
 
-**Bulk Import** - Upload up to 100 PDFs or ZIP archives, or paste a Google Drive folder link. Shows a live progress bar by polling the job status endpoint every 2 seconds.
-
-**Search and Chat** - Two-panel layout. Left panel is semantic search with skill and location filters. Right panel is the RAG chatbot. Citation chips in chat messages link to the full candidate profile in a modal dialog. Chat history is persisted in `localStorage` so it survives page navigation and browser refreshes.
-
-### Setup
-
-```powershell
-cd frontend
-
-# Install dependencies
-npm install
-
-# Copy env and set the backend URL
-cp .env.example .env
-# Edit .env: VITE_API_URL=http://localhost:8000
-
-# Start dev server
-npm run dev
-```
-
-Open `http://localhost:5173`.
+**Search & Chat** — Two-panel layout:
+- *Left:* Semantic search with skill and location filters, paginated results.
+- *Right:* RAG chatbot with streaming responses, stage indicators (`Classifying query… → Searching database… → Generating answer…`), copy-to-clipboard per message, and clickable citation chips that open the full candidate profile in a modal. Filter query responses are instant (no LLM) and show a count with profile chips. Chat history is persisted in `localStorage`.
 
 ### Frontend Environment Variables
-
-Create `frontend/.env`:
 
 ```env
 VITE_API_URL=http://localhost:8000
 ```
 
-For production, set `VITE_API_URL` to your Railway backend URL in the Vercel dashboard (Variables section). Vite bakes this in at build time so it must be set before the build runs.
+For production, set `VITE_API_URL` to your Railway backend URL in the Vercel dashboard before deploying — Vite bakes it in at build time.
 
 ---
 
-## Deploying the Frontend (Vercel)
+## Deployment
 
-1. Push the repo to GitHub (the `frontend/` directory is included).
-2. Go to [vercel.com](https://vercel.com) and import the repository.
-3. Set the **Root Directory** to `frontend`.
-4. Under **Environment Variables**, add `VITE_API_URL=https://your-app.up.railway.app`.
-5. Deploy.
+### Backend — Railway
 
-Then update the CORS `allow_origins` list in `app/main.py` to include your Vercel domain:
+1. Push this repository to GitHub.
+2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub.
+3. Railway auto-detects the `Dockerfile`.
+4. Add environment variables:
 
-```python
-allow_origins=[
-    "http://localhost:5173",
-    "https://your-app.vercel.app",
-]
+```
+MONGODB_URI              = mongodb+srv://...
+UPSTASH_REDIS_REST_URL   = https://...upstash.io
+UPSTASH_REDIS_REST_TOKEN = ...
+PINECONE_API_KEY         = pcsk_...
+PINECONE_INDEX           = candidate-intelligence
+OPENROUTER_API_KEY       = sk-or-...
 ```
 
-Redeploy the backend on Railway after that change.
+The first build is slow (~5–10 min) because the `Dockerfile` pre-downloads the `all-MiniLM-L6-v2` model at build time.
+
+### Frontend — Vercel
+
+1. Import the repository on [vercel.com](https://vercel.com).
+2. Set **Root Directory** to `frontend`.
+3. Add environment variable: `VITE_API_URL=https://your-app.up.railway.app`
+4. Deploy.
+
+After deploying, ensure the Vercel domain is in `allow_origins` in `app/main.py` and redeploy the backend.
 
 ---
 
-## Project Structure (Updated)
+## Deployment Notes
 
-```
-├── app/
-│   ├── scrapers/
-│   │   ├── github.py            # GitHub REST + GraphQL scraper
-│   │   └── linkedin.py          # Playwright-based LinkedIn scraper
-│   ├── utils/
-│   │   ├── chat.py              # LLM answer generation (OpenRouter)
-│   │   └── drive.py             # Google Drive folder download (gdown)
-│   ├── schemas.py               # All Pydantic models
-│   ├── embeddings.py            # Sentence-transformer + Pinecone logic
-│   └── main.py                  # FastAPI app and all endpoints
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ui/              # Reusable UI primitives (Button, Badge, Dialog, etc.)
-│   │   │   ├── search/          # SearchPanel, ChatPanel
-│   │   │   ├── upload/          # SingleUpload, BulkImport
-│   │   │   ├── Layout.tsx       # Sidebar and nav
-│   │   │   └── ProfileModal.tsx # Full candidate profile dialog
-│   │   ├── api.ts               # Typed axios client for all backend endpoints
-│   │   ├── App.tsx              # Root component and view routing
-│   │   └── index.css            # Tailwind v4 + CSS variables + animation keyframes
-│   ├── .env                     # VITE_API_URL (not committed)
-│   └── package.json
-├── scrape_and_store.py          # CLI: scrape and store in one command
-├── embed_all.py                 # Batch embed all MongoDB profiles to Pinecone
-├── docker-compose.yml           # Local dev: API + MongoDB + Redis
-├── Dockerfile                   # Production image
-└── requirements.txt
-```
+**LinkedIn scraper complexity:** LinkedIn's bot protection required running Chromium in headful mode. The DOM uses dynamically hashed class names and lazy-loads sections via `IntersectionObserver`, so `window.scrollTo` doesn't trigger rendering — `page.mouse.wheel` was needed instead. Skills required navigating to the dedicated `/details/skills/` sub-page. Raw extraction picked up navbar copy, ad strings, and skill proof entries ("Software Intern at X" appearing next to a skill), each requiring its own filter: a NOISE regex for UI boilerplate, an "at Company" pattern for proof entries, and keyword filters for education data bleeding in.
+
+**Google Drive ingestion:** Uses `gdown >= 5.0`. The folder must be publicly shared. Files are downloaded to a temp directory, PDFs are extracted, and the temp directory is cleaned up automatically.

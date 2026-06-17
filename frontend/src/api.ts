@@ -86,12 +86,21 @@ export interface ChatCitation {
   id: string
   name: string
   score: number
+  source: "semantic" | "filter"
 }
 
 export interface ChatResponse {
   session_id: string
   answer: string
   citations: ChatCitation[]
+}
+
+export interface StreamChatCallbacks {
+  onStage: (text: string) => void
+  onToken: (text: string) => void
+  onMeta: (sessionId: string, citations: ChatCitation[]) => void
+  onDone: (fullText: string) => void
+  onError: (e: Error) => void
 }
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -120,3 +129,51 @@ export const chatQuery = (question: string, session_id?: string) =>
 
 export const clearChat = (session_id: string) =>
   api.delete(`/chat/${session_id}`)
+
+export function streamChat(
+  question: string,
+  sessionId: string | undefined,
+  callbacks: StreamChatCallbacks,
+): AbortController {
+  const controller = new AbortController()
+
+  ;(async () => {
+    let fullText = ""
+    try {
+      const res = await fetch(`${BASE}/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, session_id: sessionId }),
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop()!
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue
+          try {
+            const event = JSON.parse(line.slice(6))
+            if (event.type === "stage") callbacks.onStage(event.text)
+            else if (event.type === "meta") callbacks.onMeta(event.session_id, event.citations)
+            else if (event.type === "token") { fullText += event.text; callbacks.onToken(event.text) }
+            else if (event.type === "done") callbacks.onDone(fullText)
+            else if (event.type === "error") throw new Error(event.text)
+          } catch { /* skip malformed lines */ }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name !== "AbortError") callbacks.onError(e instanceof Error ? e : new Error(String(e)))
+    }
+  })()
+
+  return controller
+}

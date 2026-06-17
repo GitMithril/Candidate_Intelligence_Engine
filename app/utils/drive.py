@@ -29,7 +29,6 @@ def download_drive_pdfs(folder_url: str) -> list[tuple[str, bytes]]:
                 output=tmpdir,
                 quiet=True,
                 use_cookies=False,
-                remaining_ok=True,
             )
         except Exception as exc:
             raise ValueError(f"Failed to download Drive folder '{folder_url}': {exc}")

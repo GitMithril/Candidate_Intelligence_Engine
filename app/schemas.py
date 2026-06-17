@@ -278,6 +278,7 @@ class ChatCitation(BaseModel):
     id: str
     name: str
     score: float
+    source: str = "semantic"  # "semantic" | "filter"
 
 
 class ChatResponse(BaseModel):

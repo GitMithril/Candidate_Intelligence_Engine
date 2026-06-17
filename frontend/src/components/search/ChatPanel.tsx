@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from "react"
-import { Send, Trash2, Bot, User, Loader2, MessageSquare } from "lucide-react"
+import { Send, Trash2, Bot, User, Copy, Check, MessageSquare } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { chatQuery, clearChat, type ChatCitation, type Profile } from "@/api"
+import { streamChat, clearChat, type ChatCitation, type Profile } from "@/api"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -10,10 +10,12 @@ const SESSION_KEY = "cie_chat_session"
 const MESSAGES_KEY = "cie_chat_messages"
 
 const QUICK_PROMPTS = [
+  "Compare all backend engineers",
+  "List all applicants from Islamabad",
   "Who are the strongest Python developers?",
-  "Find someone with FastAPI experience in Islamabad",
-  "Compare the top two ML candidates",
-  "Which candidates have DevOps experience?",
+  "How many candidates know React?",
+  "Find someone with FastAPI experience",
+  "Which candidates have DevOps skills?",
 ]
 
 interface Message {
@@ -37,11 +39,17 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
   })
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
+  const [stage, setStage] = useState("")
+  const [streamingText, setStreamingText] = useState("")
   const [sessionId, setSessionId] = useState<string | undefined>(
     () => localStorage.getItem(SESSION_KEY) ?? undefined
   )
+
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const streamingTextRef = useRef("")
+  const pendingCitationsRef = useRef<ChatCitation[]>([])
 
   useEffect(() => {
     localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages))
@@ -49,39 +57,78 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, loading])
+  }, [messages, loading, streamingText])
 
-  const send = async (question: string) => {
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = "auto"
+    el.style.height = `${el.scrollHeight}px`
+  }, [input])
+
+  const send = (question: string) => {
     if (!question.trim() || loading) return
     setInput("")
+    if (inputRef.current) inputRef.current.style.height = "auto"
+
     setMessages((prev) => [...prev, { role: "user", content: question }])
     setLoading(true)
-    try {
-      const res = await chatQuery(question, sessionId)
-      if (!sessionId || sessionId !== res.session_id) {
-        setSessionId(res.session_id)
-        localStorage.setItem(SESSION_KEY, res.session_id)
-      }
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: res.answer, citations: res.citations },
-      ])
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "I couldn't reach the backend. Please check the API is running.", citations: [] },
-      ])
-    } finally {
-      setLoading(false)
-    }
+    setStage("")
+    setStreamingText("")
+    streamingTextRef.current = ""
+    pendingCitationsRef.current = []
+
+    abortRef.current = streamChat(question, sessionId, {
+      onStage: (text) => setStage(text),
+
+      onMeta: (newSessionId, citations) => {
+        pendingCitationsRef.current = citations
+        if (!sessionId || sessionId !== newSessionId) {
+          setSessionId(newSessionId)
+          localStorage.setItem(SESSION_KEY, newSessionId)
+        }
+      },
+
+      onToken: (token) => {
+        streamingTextRef.current += token
+        setStreamingText(streamingTextRef.current)
+      },
+
+      onDone: (fullText) => {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: fullText, citations: pendingCitationsRef.current },
+        ])
+        setStreamingText("")
+        setStage("")
+        streamingTextRef.current = ""
+        setLoading(false)
+      },
+
+      onError: () => {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "I couldn't reach the backend. Please check the API is running.", citations: [] },
+        ])
+        setStreamingText("")
+        setStage("")
+        streamingTextRef.current = ""
+        setLoading(false)
+      },
+    })
   }
 
   const handleClear = async () => {
+    abortRef.current?.abort()
     if (sessionId) {
       try { await clearChat(sessionId) } catch { /* best-effort */ }
     }
     setMessages([])
     setSessionId(undefined)
+    setStreamingText("")
+    setStage("")
+    setLoading(false)
+    streamingTextRef.current = ""
     localStorage.removeItem(SESSION_KEY)
     localStorage.removeItem(MESSAGES_KEY)
   }
@@ -94,7 +141,6 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
   }
 
   const handleCitationClick = async (citation: ChatCitation) => {
-    // Fetch the profile and open the modal
     try {
       const { default: axios } = await import("axios")
       const base = import.meta.env.VITE_API_URL ?? "http://localhost:8000"
@@ -116,7 +162,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
             <div className="text-xs text-gray-400">RAG · Grounded in your database</div>
           </div>
         </div>
-        {messages.length > 0 && (
+        {(messages.length > 0 || loading) && (
           <Button variant="ghost" size="sm" onClick={handleClear} className="text-gray-400 hover:text-red-500 gap-1.5">
             <Trash2 className="w-3.5 h-3.5" /> Clear
           </Button>
@@ -137,14 +183,28 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
           />
         ))}
 
+        {/* Streaming / stage bubble */}
         {loading && (
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-start gap-2.5">
             <div className="w-7 h-7 rounded-lg bg-purple-100 flex items-center justify-center flex-none">
               <Bot className="w-3.5 h-3.5 text-purple-600" />
             </div>
-            <div className="flex items-center gap-1.5 bg-gray-50 rounded-2xl rounded-tl-sm px-4 py-3">
-              <Loader2 className="w-3.5 h-3.5 text-purple-400 animate-spin" />
-              <span className="text-sm text-gray-400">Searching database…</span>
+            <div className="bg-gray-50 rounded-2xl rounded-tl-sm border border-gray-100 px-4 py-3 text-sm text-gray-800 leading-relaxed max-w-[82%]">
+              {streamingText ? (
+                <div className="chat-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+                  <span className="inline-block w-0.5 h-3.5 bg-purple-400 ml-0.5 align-middle animate-pulse" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-gray-400">
+                  <span className="flex gap-0.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-bounce [animation-delay:0ms]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-bounce [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-bounce [animation-delay:300ms]" />
+                  </span>
+                  <span className="text-xs">{stage || "Thinking…"}</span>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -162,8 +222,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
             onKeyDown={handleKeyDown}
             placeholder="Ask about candidates… (Enter to send, Shift+Enter for new line)"
             rows={1}
-            className="flex-1 resize-none bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none leading-relaxed max-h-32 overflow-y-auto"
-            style={{ minHeight: "24px" }}
+            className="flex-1 resize-none bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none leading-relaxed max-h-40 overflow-y-auto"
           />
           <button
             onClick={() => send(input)}
@@ -217,7 +276,14 @@ function ChatMessage({ message, onCitationClick }: {
   message: Message
   onCitationClick: (c: ChatCitation) => void
 }) {
+  const [copied, setCopied] = useState(false)
   const isUser = message.role === "user"
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
 
   return (
     <div className={cn("flex items-start gap-2.5", isUser && "flex-row-reverse")}>
@@ -235,7 +301,7 @@ function ChatMessage({ message, onCitationClick }: {
       <div className={cn("flex flex-col gap-2 max-w-[82%]", isUser && "items-end")}>
         {/* Bubble */}
         <div className={cn(
-          "rounded-2xl px-4 py-3 text-sm leading-relaxed",
+          "group relative rounded-2xl px-4 py-3 text-sm leading-relaxed",
           isUser
             ? "bg-purple-700 text-white rounded-tr-sm"
             : "bg-gray-50 text-gray-800 rounded-tl-sm border border-gray-100"
@@ -244,6 +310,20 @@ function ChatMessage({ message, onCitationClick }: {
             <div className="chat-markdown">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
             </div>
+          )}
+
+          {/* Copy button — assistant messages only */}
+          {!isUser && (
+            <button
+              onClick={handleCopy}
+              title={copied ? "Copied!" : "Copy response"}
+              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-gray-200"
+            >
+              {copied
+                ? <Check className="w-3 h-3 text-green-500" />
+                : <Copy className="w-3 h-3 text-gray-400" />
+              }
+            </button>
           )}
         </div>
 
@@ -261,7 +341,7 @@ function ChatMessage({ message, onCitationClick }: {
 }
 
 function CitationChip({ citation, onClick }: { citation: ChatCitation; onClick: () => void }) {
-  const pct = Math.round(citation.score * 100)
+  const isFilter = citation.source === "filter"
   return (
     <button
       onClick={onClick}
@@ -272,7 +352,10 @@ function CitationChip({ citation, onClick }: { citation: ChatCitation; onClick: 
         {(citation.name ?? "?")[0].toUpperCase()}
       </div>
       <span className="text-xs font-medium text-purple-700">{citation.name}</span>
-      <span className="text-[10px] font-mono text-purple-400">{pct}%</span>
+      {isFilter
+        ? <span className="text-[10px] text-purple-400">Matched</span>
+        : <span className="text-[10px] font-mono text-purple-400">{Math.round(citation.score * 100)}%</span>
+      }
     </button>
   )
 }

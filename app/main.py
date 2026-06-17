@@ -16,9 +16,11 @@ DELETE /chat/{session_id}       Clear a chat session history.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
+import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -29,6 +31,7 @@ from bson.errors import InvalidId
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pymongo import MongoClient, ReturnDocument
 
 from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
@@ -729,6 +732,91 @@ def get_bulk_job(job_id: str):
     return {"job_id": job_id, **state}
 
 
+def _build_mongo_filter(criteria: dict) -> dict:
+    """Translate LLM-extracted filter criteria into a MongoDB query.
+
+    Only handles concrete, enumerable values: location, named skills, school.
+    Role/concept filtering is handled by semantic search, not here.
+    """
+    conditions: list[dict] = []
+
+    location = criteria.get("location")
+    if location:
+        conditions.append({"location": {"$regex": re.escape(location), "$options": "i"}})
+
+    for skill in (criteria.get("skills") or []):
+        conditions.append({"skills": {"$elemMatch": {"$regex": re.escape(skill), "$options": "i"}}})
+
+    school = criteria.get("school")
+    if school:
+        conditions.append({"education": {"$elemMatch": {"school": {"$regex": re.escape(school), "$options": "i"}}}})
+
+    if not conditions:
+        return {}
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def _filter_response(candidates: list[dict]) -> str:
+    """Generate a concise template answer for filter queries — no LLM needed."""
+    n = len(candidates)
+    if n == 0:
+        return "No candidates found matching your criteria."
+    noun = "candidate" if n == 1 else "candidates"
+    return f"Found **{n} {noun}** matching your criteria. Open any profile chip below to view their full details."
+
+
+def _fetch_candidates(
+    question: str,
+    classification: dict,
+    db,
+) -> tuple[list[dict], list[ChatCitation]]:
+    """Fetch candidate docs and build citations based on query classification.
+
+    Shared by both the sync /chat endpoint and the async /chat/stream endpoint.
+    Always sync — the streaming endpoint wraps it with asyncio.to_thread.
+    """
+    query_type = classification.get("type", "semantic")
+    candidates: list[dict] = []
+    citations: list[ChatCitation] = []
+
+    if query_type == "filter":
+        criteria = classification.get("criteria") or {}
+        mongo_filter = _build_mongo_filter(criteria)
+        for doc in db.profiles.find(mongo_filter).limit(30):
+            _serialize(doc)
+            candidates.append(doc)
+            citations.append(ChatCitation(
+                id=doc["id"],
+                name=doc.get("name") or "Unknown",
+                score=1.0,
+                source="filter",
+            ))
+    elif query_type == "semantic":
+        top_k = int(classification.get("top_k") or 10)
+        vector = embed_text(question)
+        matches = query_similar(vector, top_k)
+        for match in matches.matches:
+            try:
+                doc = db.profiles.find_one({"_id": ObjectId(match.id)})
+            except Exception:
+                continue
+            if doc is None:
+                continue
+            _serialize(doc)
+            candidates.append(doc)
+            citations.append(ChatCitation(
+                id=doc["id"],
+                name=doc.get("name") or "Unknown",
+                score=round(match.score, 4),
+                source="semantic",
+            ))
+    # "irrelevant": returns empty lists — LLM politely declines
+
+    return candidates, citations
+
+
 @app.post(
     "/chat",
     response_model=ChatResponse,
@@ -737,49 +825,95 @@ def get_bulk_job(job_id: str):
 )
 def chat(req: ChatRequest):
     """
-    Ask any recruiter question about the candidates in the database.
-    The system retrieves the most relevant profiles from Pinecone, passes them as
-    context to the LLM, and returns a grounded answer along with source citations
-    (candidate id, name, similarity score).
-
-    Provide a `session_id` to continue an existing conversation; omit it to start
-    a new session. Session history is persisted in Redis for 24 hours.
+    Non-streaming chat. Classify query, fetch candidates, call LLM, return full answer.
+    Prefer POST /chat/stream for a real-time experience.
     """
+    from .utils.chat import answer_question, classify_query
+
     session_id = req.session_id or str(uuid.uuid4())
     history = _load_history(session_id)
+    classification = classify_query(req.question)
+    candidates, citations = _fetch_candidates(req.question, classification, _db())
 
-    vector = embed_text(req.question)
-    matches = query_similar(vector, 5)
-
-    db = _db()
-    candidates: list[dict] = []
-    citations: list[ChatCitation] = []
-    for match in matches.matches:
+    if classification.get("type") == "filter":
+        answer = _filter_response(candidates)
+    else:
         try:
-            doc = db.profiles.find_one({"_id": ObjectId(match.id)})
-        except Exception:
-            continue
-        if doc is None:
-            continue
-        _serialize(doc)
-        candidates.append(doc)
-        citations.append(ChatCitation(
-            id=doc["id"],
-            name=doc.get("name") or "Unknown",
-            score=round(match.score, 4),
-        ))
-
-    from .utils.chat import answer_question
-    try:
-        answer = answer_question(req.question, history, candidates)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+            answer = answer_question(req.question, history, candidates)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
 
     history.append({"role": "human", "content": req.question})
     history.append({"role": "assistant", "content": answer})
     _save_history(session_id, history)
 
     return ChatResponse(session_id=session_id, answer=answer, citations=citations)
+
+
+@app.post(
+    "/chat/stream",
+    summary="Streaming conversational RAG (SSE)",
+    response_description="Server-sent events: stage → meta → token… → done.",
+)
+async def chat_stream(req: ChatRequest):
+    """
+    Streaming variant of POST /chat.
+
+    Emits server-sent events in this order:
+      {"type": "stage",  "text": "Classifying query…"}
+      {"type": "stage",  "text": "Searching database…"}
+      {"type": "meta",   "session_id": "…", "citations": […]}
+      {"type": "stage",  "text": "Generating answer…"}
+      {"type": "token",  "text": "<chunk>"}   (many)
+      {"type": "done"}
+    On error: {"type": "error", "text": "…"}
+    """
+    from .utils.chat import classify_query, build_messages, get_llm
+
+    session_id = req.session_id or str(uuid.uuid4())
+    history = _load_history(session_id)
+
+    async def generate():
+        try:
+            yield f"data: {json.dumps({'type': 'stage', 'text': 'Classifying query…'})}\n\n"
+            classification = await asyncio.to_thread(classify_query, req.question)
+
+            yield f"data: {json.dumps({'type': 'stage', 'text': 'Searching database…'})}\n\n"
+            candidates, citations = await asyncio.to_thread(
+                _fetch_candidates, req.question, classification, _db()
+            )
+
+            yield f"data: {json.dumps({'type': 'meta', 'session_id': session_id, 'citations': [c.model_dump() for c in citations]})}\n\n"
+
+            if classification.get("type") == "filter":
+                # Filter results are exact DB matches — no LLM needed.
+                full_text = _filter_response(candidates)
+                yield f"data: {json.dumps({'type': 'token', 'text': full_text})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'stage', 'text': 'Generating answer…'})}\n\n"
+                messages = build_messages(req.question, history, candidates)
+                llm = get_llm()
+                full_text = ""
+                async for chunk in llm.astream(messages):
+                    token = chunk.content or ""
+                    if token:
+                        full_text += token
+                        yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+
+            history.append({"role": "human", "content": req.question})
+            history.append({"role": "assistant", "content": full_text})
+            await asyncio.to_thread(_save_history, session_id, history)
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'text': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 @app.delete(
