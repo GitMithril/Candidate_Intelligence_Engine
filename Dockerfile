@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright's Chromium browser + all system-level dependencies it needs.
+# PLAYWRIGHT_BROWSERS_PATH must be set before install so the browser lands in a
+# fixed, known path that is also used at runtime.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps chromium
 
 # Pre-download the embedding model at build time so the first API call isn't slow.

@@ -144,6 +144,7 @@ class SourceUrls(BaseModel):
 class CandidateProfile(BaseModel):
     scraped_at: str
     source_urls: SourceUrls
+    user_id: Optional[str] = None
     # Identity fields — LinkedIn preferred, GitHub fallback
     name: Optional[str] = None
     headline: Optional[str] = None

@@ -6,12 +6,15 @@ Endpoints
 POST /profiles                  Insert or update a candidate profile.
 GET  /profiles/{id}             Fetch a single profile by MongoDB ObjectId.
 POST /profiles/{id}/embed       Generate and store a vector embedding.
+DELETE /profiles/{id}           Delete a profile from MongoDB and Pinecone.
+GET  /candidates                List all profiles for the authenticated user.
 GET  /search                    Semantic search over candidate profiles.
 POST /scrape                    Scrape GitHub/LinkedIn by URL, store and embed automatically.
 POST /ingest                    Accept resume PDF + optional URLs, build and store a profile.
 POST /ingest/bulk               Start a background bulk ingestion job (PDFs, ZIP, or Drive URL).
 GET  /ingest/bulk/{job_id}      Poll progress of a bulk ingestion job.
 POST /chat                      Conversational RAG over the candidate database; returns answer + citations.
+POST /chat/stream               Streaming conversational RAG (SSE).
 DELETE /chat/{session_id}       Clear a chat session history.
 """
 from __future__ import annotations
@@ -32,12 +35,13 @@ logger = logging.getLogger(__name__)
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient, ReturnDocument
 
-from .embeddings import embed_and_store, embed_profile_by_id, embed_text, query_similar
+from .auth import get_current_user
+from .embeddings import delete_vector, embed_and_store, embed_profile_by_id, embed_text, query_similar
 from .scrapers.github import scrape_github
 from .scrapers.linkedin import scrape_linkedin
 from .schemas import (
@@ -160,27 +164,27 @@ def _load_job(job_id: str) -> Optional[dict]:
     return _job_store.get(job_id)
 
 
-def _load_history(session_id: str) -> list[dict]:
+def _load_history(session_id: str, user_id: str) -> list[dict]:
     r = _redis()
     if r:
-        raw = r.get(f"chat:{session_id}")
+        raw = r.get(f"chat:{user_id}:{session_id}")
         if raw:
             return json.loads(raw)
-    return _chat_store.get(session_id, [])
+    return _chat_store.get(f"{user_id}:{session_id}", [])
 
 
-def _save_history(session_id: str, history: list[dict]) -> None:
-    _chat_store[session_id] = history
+def _save_history(session_id: str, history: list[dict], user_id: str) -> None:
+    _chat_store[f"{user_id}:{session_id}"] = history
     r = _redis()
     if r:
-        r.set(f"chat:{session_id}", json.dumps(history), ex=86400)
+        r.set(f"chat:{user_id}:{session_id}", json.dumps(history), ex=86400)
 
 
-def _delete_history(session_id: str) -> None:
-    _chat_store.pop(session_id, None)
+def _delete_history(session_id: str, user_id: str) -> None:
+    _chat_store.pop(f"{user_id}:{session_id}", None)
     r = _redis()
     if r:
-        r.delete(f"chat:{session_id}")
+        r.delete(f"chat:{user_id}:{session_id}")
 
 
 def _merge(req: ProfileCreateRequest) -> CandidateProfile:
@@ -235,21 +239,16 @@ def _serialize(doc: dict) -> dict:
     summary="Insert or update a candidate profile",
     response_description="The stored candidate profile with its MongoDB id.",
 )
-def create_profile(req: ProfileCreateRequest):
-    """
-    Merge GitHub and LinkedIn scraper outputs into a unified candidate profile
-    and store it in MongoDB. If a profile for the same github_username (or
-    linkedin_url when no GitHub username is provided) already exists, it is
-    replaced with fresh data.
-    """
+def create_profile(req: ProfileCreateRequest, user_id: str = Depends(get_current_user)):
     profile = _merge(req)
     doc = profile.model_dump()
+    doc["user_id"] = user_id
 
     db = _db()
     filter_q = (
-        {"github_username": req.github_username}
+        {"github_username": req.github_username, "user_id": user_id}
         if req.github_username
-        else {"source_urls.linkedin": req.linkedin_url}
+        else {"source_urls.linkedin": req.linkedin_url, "user_id": user_id}
     )
 
     result = db.profiles.find_one_and_replace(
@@ -267,21 +266,56 @@ def create_profile(req: ProfileCreateRequest):
     summary="Fetch a candidate profile by ID",
     response_description="The candidate profile matching the given MongoDB ObjectId.",
 )
-def get_profile(profile_id: str):
-    """
-    Retrieve a single candidate profile by its MongoDB ObjectId string.
-    Returns 400 for a malformed id and 404 if no profile is found.
-    """
+def get_profile(profile_id: str, user_id: str = Depends(get_current_user)):
     try:
         oid = ObjectId(profile_id)
     except InvalidId:
         raise HTTPException(status_code=400, detail="Invalid profile id format — expected a 24-character hex ObjectId.")
 
-    doc = _db().profiles.find_one({"_id": oid})
+    doc = _db().profiles.find_one({"_id": oid, "user_id": user_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="Profile not found.")
 
     return _serialize(doc)
+
+
+@app.delete(
+    "/profiles/{profile_id}",
+    status_code=204,
+    summary="Delete a candidate profile",
+    response_description="No content — profile deleted from MongoDB and Pinecone.",
+)
+def delete_profile(profile_id: str, user_id: str = Depends(get_current_user)):
+    try:
+        oid = ObjectId(profile_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid profile id format.")
+
+    doc = _db().profiles.find_one({"_id": oid, "user_id": user_id})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    _db().profiles.delete_one({"_id": oid, "user_id": user_id})
+    logger.info("[delete] Removed profile id=%s from MongoDB", profile_id)
+
+    try:
+        delete_vector(profile_id)
+        logger.info("[delete] Removed vector id=%s from Pinecone", profile_id)
+    except Exception as exc:
+        logger.warning("[delete] Pinecone delete failed for %s: %s", profile_id, exc)
+
+    return Response(status_code=204)
+
+
+@app.get(
+    "/candidates",
+    response_model=list[ProfileResponse],
+    summary="List all candidates for the authenticated user",
+    response_description="All stored profiles belonging to the current user.",
+)
+def list_candidates(user_id: str = Depends(get_current_user)):
+    docs = list(_db().profiles.find({"user_id": user_id}).sort("scraped_at", -1))
+    return [_serialize(doc) for doc in docs]
 
 
 @app.post(
@@ -289,22 +323,17 @@ def get_profile(profile_id: str):
     summary="Generate and store a vector embedding for a profile",
     response_description="Confirmation that the embedding was stored in Pinecone.",
 )
-def embed_profile(profile_id: str):
-    """
-    Embed the candidate profile identified by `profile_id` using
-    all-MiniLM-L6-v2 and upsert the 384-dim vector to Pinecone.
-    Returns 400 for a malformed id and 404 if no profile is found.
-    """
+def embed_profile(profile_id: str, user_id: str = Depends(get_current_user)):
     try:
-        ObjectId(profile_id)
+        oid = ObjectId(profile_id)
     except InvalidId:
         raise HTTPException(status_code=400, detail="Invalid profile id format — expected a 24-character hex ObjectId.")
 
-    try:
-        embed_profile_by_id(profile_id, _db())
-    except ValueError:
+    doc = _db().profiles.find_one({"_id": oid, "user_id": user_id})
+    if doc is None:
         raise HTTPException(status_code=404, detail="Profile not found.")
 
+    embed_and_store(profile_id, doc)
     return {"id": profile_id, "embedded": True}
 
 
@@ -319,14 +348,9 @@ def search_profiles(
     skills: Optional[str] = Query(None, description="Comma-separated required skills (must match all)"),
     location: Optional[str] = Query(None, description="Location substring filter (case-insensitive)"),
     k: int = Query(10, ge=1, le=50, description="Number of results to return (default 10, max 50)"),
+    user_id: str = Depends(get_current_user),
 ):
-    """
-    Embed the query with all-MiniLM-L6-v2, retrieve the top-k nearest profiles
-    from Pinecone, fetch full documents from MongoDB, and apply optional
-    skills / location filters. Repeated identical queries are served from a
-    Redis cache with a 5-minute TTL.
-    """
-    cache_key = f"search:{q}|{skills or ''}|{location or ''}|{k}"
+    cache_key = f"search:{user_id}:{q}|{skills or ''}|{location or ''}|{k}"
     r = _redis()
 
     if r:
@@ -336,15 +360,14 @@ def search_profiles(
             return {"query": q, "results": stored["results"], "cached": True}
 
     vector = embed_text(q)
-    # Fetch extra candidates to absorb any filter losses before capping at k.
     fetch_k = min(k * 4, 100) if (skills or location) else k
-    matches = query_similar(vector, fetch_k)
+    matches = query_similar(vector, fetch_k, user_id=user_id)
 
     db = _db()
     results = []
     for match in matches.matches:
         try:
-            doc = db.profiles.find_one({"_id": ObjectId(match.id)})
+            doc = db.profiles.find_one({"_id": ObjectId(match.id), "user_id": user_id})
         except Exception:
             continue
         if doc is None:
@@ -408,6 +431,7 @@ def _assemble_and_store(
     resume_data: Optional[ResumeExtraction],
     linkedin_url: Optional[str],
     github_username: Optional[str],
+    user_id: str,
 ) -> dict:
     """Scrape URLs, merge with resume data, store in MongoDB, embed in Pinecone.
 
@@ -466,20 +490,21 @@ def _assemble_and_store(
     else:
         raise ValueError("No profile data could be assembled.")
 
-    # Resume location takes priority over scraped LinkedIn/GitHub location.
     if resume_data and resume_data.location:
         profile.location = resume_data.location
 
     doc = profile.model_dump()
+    doc["user_id"] = user_id
+
     if resume_data and resume_data.email and not doc.get("github_email"):
         doc["github_email"] = resume_data.email
 
     if github_username:
-        filter_q: Optional[dict] = {"github_username": github_username}
+        filter_q: Optional[dict] = {"github_username": github_username, "user_id": user_id}
     elif linkedin_url:
-        filter_q = {"source_urls.linkedin": linkedin_url}
+        filter_q = {"source_urls.linkedin": linkedin_url, "user_id": user_id}
     elif resume_data and resume_data.email:
-        filter_q = {"github_email": resume_data.email}
+        filter_q = {"github_email": resume_data.email, "user_id": user_id}
     else:
         filter_q = None
 
@@ -488,10 +513,7 @@ def _assemble_and_store(
 
 
 def _extract_zip_pdfs(zip_bytes: bytes) -> tuple[list[tuple[str, bytes]], list[dict]]:
-    """Extract PDFs from a ZIP archive.
-
-    Returns (pdf_items, errors). Non-PDFs and directories are recorded in errors.
-    """
+    """Extract PDFs from a ZIP archive."""
     pdf_items: list[tuple[str, bytes]] = []
     errors: list[dict] = []
 
@@ -508,7 +530,7 @@ def _extract_zip_pdfs(zip_bytes: bytes) -> tuple[list[tuple[str, bytes]], list[d
     return pdf_items, errors
 
 
-def _process_resume_bytes(filename: str, pdf_bytes: bytes) -> dict:
+def _process_resume_bytes(filename: str, pdf_bytes: bytes, user_id: str) -> dict:
     """Extract, parse, and store a single resume PDF. Raises on any error."""
     logger.info("[bulk] Processing: %s", filename)
     if pdf_bytes[:4] != b"%PDF":
@@ -525,10 +547,10 @@ def _process_resume_bytes(filename: str, pdf_bytes: bytes) -> dict:
     if not any([resume_data.name, resume_data.email, resume_data.skills, resume_data.experience]):
         raise ValueError(f"LLM could not extract usable data from '{filename}'.")
 
-    return _assemble_and_store(resume_data, resume_data.linkedin_url, resume_data.github_username)
+    return _assemble_and_store(resume_data, resume_data.linkedin_url, resume_data.github_username, user_id)
 
 
-def _run_bulk_ingest(job_id: str, items: list[tuple[str, bytes]], drive_url: Optional[str]) -> None:
+def _run_bulk_ingest(job_id: str, items: list[tuple[str, bytes]], drive_url: Optional[str], user_id: str) -> None:
     """Background task: process each PDF, updating job state after every file."""
     state = _load_job(job_id)
     state["status"] = "running"
@@ -554,7 +576,7 @@ def _run_bulk_ingest(job_id: str, items: list[tuple[str, bytes]], drive_url: Opt
 
     for filename, pdf_bytes in all_items:
         try:
-            _process_resume_bytes(filename, pdf_bytes)
+            _process_resume_bytes(filename, pdf_bytes, user_id)
             state["processed"] += 1
         except Exception as exc:
             state["failed"] += 1
@@ -572,11 +594,7 @@ def _run_bulk_ingest(job_id: str, items: list[tuple[str, bytes]], drive_url: Opt
     summary="Scrape GitHub and/or LinkedIn and store the result",
     response_description="The scraped, stored, and embedded candidate profile.",
 )
-def scrape(req: ScrapeRequest):
-    """
-    Trigger a live GitHub and/or LinkedIn scrape by providing a username / URL.
-    The resulting profile is stored in MongoDB and automatically embedded in Pinecone.
-    """
+def scrape(req: ScrapeRequest, user_id: str = Depends(get_current_user)):
     gh_profile: Optional[GitHubProfile] = None
     li_profile: Optional[LinkedInProfile] = None
 
@@ -597,11 +615,12 @@ def scrape(req: ScrapeRequest):
         linkedin_profile=li_profile,
     )
     doc = _merge(profile_req).model_dump()
+    doc["user_id"] = user_id
 
     filter_q = (
-        {"github_username": req.github_username}
+        {"github_username": req.github_username, "user_id": user_id}
         if req.github_username
-        else {"source_urls.linkedin": req.linkedin_url}
+        else {"source_urls.linkedin": req.linkedin_url, "user_id": user_id}
     )
     result = _store_and_embed(doc, filter_q)
     return _serialize(result)
@@ -618,13 +637,8 @@ def ingest(
     linkedin_url: Optional[str] = Form(default=None, example="https://linkedin.com/in/username"),
     github_username: Optional[str] = Form(default=None, example="github-username"),
     resume: Optional[UploadFile] = File(None),
+    user_id: str = Depends(get_current_user),
 ):
-    """
-    Accept any combination of a resume PDF, a LinkedIn URL, and a GitHub username.
-    The resume is parsed by an LLM to extract structured fields and any embedded URLs.
-    Missing URLs are returned in `missing_links` so the caller can prompt the user.
-    The profile is stored in MongoDB and embedded in Pinecone automatically.
-    """
     if not linkedin_url and not github_username and not resume:
         raise HTTPException(
             status_code=422,
@@ -668,7 +682,7 @@ def ingest(
                     missing_links.append("github_username")
 
     try:
-        result = _assemble_and_store(resume_data, linkedin_url, github_username)
+        result = _assemble_and_store(resume_data, linkedin_url, github_username, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -688,16 +702,8 @@ def ingest_bulk(
     background_tasks: BackgroundTasks,
     files: Optional[list[UploadFile]] = File(None),
     drive_url: Optional[str] = Form(default=None, example="https://drive.google.com/drive/folders/FOLDER_ID"),
+    user_id: str = Depends(get_current_user),
 ):
-    """
-    Accept multiple PDFs, a ZIP archive containing PDFs, or a public Google Drive
-    folder URL (or any combination). Processing runs in the background.
-
-    Non-PDF direct uploads are rejected immediately with HTTP 400.
-    Non-PDF files inside a ZIP or Drive folder are recorded as errors and skipped.
-
-    Poll GET /ingest/bulk/{job_id} for progress.
-    """
     if not files and not drive_url:
         raise HTTPException(
             status_code=422,
@@ -733,9 +739,10 @@ def ingest_bulk(
         "processed": 0,
         "failed": len(pre_errors),
         "errors": pre_errors,
+        "user_id": user_id,
     })
 
-    background_tasks.add_task(_run_bulk_ingest, job_id, items, drive_url)
+    background_tasks.add_task(_run_bulk_ingest, job_id, items, drive_url, user_id)
 
     return {"job_id": job_id, "status": "pending", "total": len(items)}
 
@@ -746,23 +753,17 @@ def ingest_bulk(
     summary="Poll the status of a bulk ingestion job",
     response_description="Current progress of the bulk ingestion job.",
 )
-def get_bulk_job(job_id: str):
-    """
-    Returns the current status (pending / running / complete), counts of processed
-    and failed files, and a per-file error list for anything that was skipped.
-    """
+def get_bulk_job(job_id: str, user_id: str = Depends(get_current_user)):
     state = _load_job(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    if state.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this job.")
     return {"job_id": job_id, **state}
 
 
 def _build_mongo_filter(criteria: dict) -> dict:
-    """Translate LLM-extracted filter criteria into a MongoDB query.
-
-    Only handles concrete, enumerable values: location, named skills, school.
-    Role/concept filtering is handled by semantic search, not here.
-    """
+    """Translate LLM-extracted filter criteria into a MongoDB query."""
     conditions: list[dict] = []
 
     location = criteria.get("location")
@@ -796,12 +797,9 @@ def _fetch_candidates(
     question: str,
     classification: dict,
     db,
+    user_id: str,
 ) -> tuple[list[dict], list[ChatCitation]]:
-    """Fetch candidate docs and build citations based on query classification.
-
-    Shared by both the sync /chat endpoint and the async /chat/stream endpoint.
-    Always sync — the streaming endpoint wraps it with asyncio.to_thread.
-    """
+    """Fetch candidate docs and build citations based on query classification."""
     query_type = classification.get("type", "semantic")
     candidates: list[dict] = []
     citations: list[ChatCitation] = []
@@ -809,6 +807,7 @@ def _fetch_candidates(
     if query_type == "filter":
         criteria = classification.get("criteria") or {}
         mongo_filter = _build_mongo_filter(criteria)
+        mongo_filter["user_id"] = user_id
         for doc in db.profiles.find(mongo_filter).limit(30):
             _serialize(doc)
             candidates.append(doc)
@@ -821,10 +820,10 @@ def _fetch_candidates(
     elif query_type == "semantic":
         top_k = int(classification.get("top_k") or 10)
         vector = embed_text(question)
-        matches = query_similar(vector, top_k)
+        matches = query_similar(vector, top_k, user_id=user_id)
         for match in matches.matches:
             try:
-                doc = db.profiles.find_one({"_id": ObjectId(match.id)})
+                doc = db.profiles.find_one({"_id": ObjectId(match.id), "user_id": user_id})
             except Exception:
                 continue
             if doc is None:
@@ -837,7 +836,6 @@ def _fetch_candidates(
                 score=round(match.score, 4),
                 source="semantic",
             ))
-    # "irrelevant": returns empty lists — LLM politely declines
 
     return candidates, citations
 
@@ -848,17 +846,13 @@ def _fetch_candidates(
     summary="Conversational RAG over the candidate database",
     response_description="The assistant's answer grounded in matching candidate profiles, plus citations.",
 )
-def chat(req: ChatRequest):
-    """
-    Non-streaming chat. Classify query, fetch candidates, call LLM, return full answer.
-    Prefer POST /chat/stream for a real-time experience.
-    """
+def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
     from .utils.chat import answer_question, classify_query
 
     session_id = req.session_id or str(uuid.uuid4())
-    history = _load_history(session_id)
+    history = _load_history(session_id, user_id)
     classification = classify_query(req.question)
-    candidates, citations = _fetch_candidates(req.question, classification, _db())
+    candidates, citations = _fetch_candidates(req.question, classification, _db(), user_id)
 
     if classification.get("type") == "filter":
         answer = _filter_response(candidates)
@@ -870,7 +864,7 @@ def chat(req: ChatRequest):
 
     history.append({"role": "human", "content": req.question})
     history.append({"role": "assistant", "content": answer})
-    _save_history(session_id, history)
+    _save_history(session_id, history, user_id)
 
     return ChatResponse(session_id=session_id, answer=answer, citations=citations)
 
@@ -880,23 +874,11 @@ def chat(req: ChatRequest):
     summary="Streaming conversational RAG (SSE)",
     response_description="Server-sent events: stage → meta → token… → done.",
 )
-async def chat_stream(req: ChatRequest):
-    """
-    Streaming variant of POST /chat.
-
-    Emits server-sent events in this order:
-      {"type": "stage",  "text": "Classifying query…"}
-      {"type": "stage",  "text": "Searching database…"}
-      {"type": "meta",   "session_id": "…", "citations": […]}
-      {"type": "stage",  "text": "Generating answer…"}
-      {"type": "token",  "text": "<chunk>"}   (many)
-      {"type": "done"}
-    On error: {"type": "error", "text": "…"}
-    """
+async def chat_stream(req: ChatRequest, user_id: str = Depends(get_current_user)):
     from .utils.chat import classify_query, build_messages, get_llm
 
     session_id = req.session_id or str(uuid.uuid4())
-    history = _load_history(session_id)
+    history = _load_history(session_id, user_id)
 
     async def generate():
         try:
@@ -905,13 +887,12 @@ async def chat_stream(req: ChatRequest):
 
             yield f"data: {json.dumps({'type': 'stage', 'text': 'Searching database…'})}\n\n"
             candidates, citations = await asyncio.to_thread(
-                _fetch_candidates, req.question, classification, _db()
+                _fetch_candidates, req.question, classification, _db(), user_id
             )
 
             yield f"data: {json.dumps({'type': 'meta', 'session_id': session_id, 'citations': [c.model_dump() for c in citations]})}\n\n"
 
             if classification.get("type") == "filter":
-                # Filter results are exact DB matches — no LLM needed.
                 full_text = _filter_response(candidates)
                 yield f"data: {json.dumps({'type': 'token', 'text': full_text})}\n\n"
             else:
@@ -927,7 +908,7 @@ async def chat_stream(req: ChatRequest):
 
             history.append({"role": "human", "content": req.question})
             history.append({"role": "assistant", "content": full_text})
-            await asyncio.to_thread(_save_history, session_id, history)
+            await asyncio.to_thread(_save_history, session_id, history, user_id)
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -947,11 +928,6 @@ async def chat_stream(req: ChatRequest):
     summary="Clear a chat session",
     response_description="No content — session history has been deleted.",
 )
-def delete_chat_session(session_id: str):
-    """
-    Delete all conversation history for the given session_id from Redis.
-    After this call the session_id is invalid; the next POST /chat with this
-    session_id will start a fresh conversation.
-    """
-    _delete_history(session_id)
+def delete_chat_session(session_id: str, user_id: str = Depends(get_current_user)):
+    _delete_history(session_id, user_id)
     return Response(status_code=204)

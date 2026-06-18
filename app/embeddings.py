@@ -71,7 +71,7 @@ def embed_and_store(profile_id: str, doc: dict[str, Any]) -> list[float]:
     vector: list[float] = _get_model().encode(text).tolist()
 
     metadata: dict[str, Any] = {}
-    for key in ("name", "headline", "location"):
+    for key in ("name", "headline", "location", "user_id"):
         if doc.get(key):
             metadata[key] = doc[key]
     skills = doc.get("skills") or []
@@ -87,9 +87,17 @@ def embed_text(text: str) -> list[float]:
     return _get_model().encode(text).tolist()
 
 
-def query_similar(vector: list[float], top_k: int):
+def query_similar(vector: list[float], top_k: int, user_id: str | None = None):
     """Query Pinecone for the top_k nearest vectors. Returns a QueryResponse."""
-    return _get_index().query(vector=vector, top_k=top_k, include_metadata=True)
+    pinecone_filter = {"user_id": {"$eq": user_id}} if user_id else None
+    return _get_index().query(
+        vector=vector, top_k=top_k, include_metadata=True, filter=pinecone_filter
+    )
+
+
+def delete_vector(profile_id: str) -> None:
+    """Delete a vector from Pinecone by profile id."""
+    _get_index().delete(ids=[profile_id])
 
 
 def embed_profile_by_id(profile_id: str, db) -> list[float]:
