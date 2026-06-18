@@ -40,6 +40,10 @@ export function SingleUpload() {
       setError("Provide at least one of: LinkedIn URL, GitHub username, or resume PDF.")
       return
     }
+    if (linkedinUrl && !/^https:\/\/(www\.)?linkedin\.com\/in\/[^/\s]+\/?$/.test(linkedinUrl)) {
+      setError("LinkedIn URL must be in the format: https://www.linkedin.com/in/profile-name/")
+      return
+    }
     setLoading(true)
     setResult(null)
     setError(null)

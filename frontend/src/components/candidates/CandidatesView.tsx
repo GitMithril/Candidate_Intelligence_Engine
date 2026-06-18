@@ -143,7 +143,7 @@ function CandidateCard({ profile, onView, onDeleted }: CardProps) {
   const initials = (profile.name ?? "?")[0].toUpperCase()
 
   return (
-    <div className="group relative rounded-xl border border-gray-100 bg-white hover:border-purple-200 hover:shadow-sm transition-all duration-150 flex flex-col">
+    <div onClick={onView} className="group relative rounded-xl border border-gray-100 bg-white hover:border-purple-200 hover:shadow-sm transition-all duration-150 flex flex-col cursor-pointer">
       {/* Card body */}
       <div className="p-4 flex-1">
         {/* Top row: avatar + delete */}
@@ -237,7 +237,7 @@ function CandidateCard({ profile, onView, onDeleted }: CardProps) {
         </div>
 
         <button
-          onClick={onView}
+          onClick={(e) => { e.stopPropagation(); onView() }}
           className="flex items-center gap-1 text-[11px] text-purple-600 hover:text-purple-800 font-medium transition-colors"
         >
           <ExternalLink className="w-3 h-3" /> View
