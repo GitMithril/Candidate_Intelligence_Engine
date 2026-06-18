@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react"
 import { Send, Trash2, Bot, User, Copy, Check, MessageSquare } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { streamChat, clearChat, type ChatCitation, type Profile } from "@/api"
+import { streamChat, clearChat, getProfile, type ChatCitation, type Profile } from "@/api"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -142,10 +142,8 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
 
   const handleCitationClick = async (citation: ChatCitation) => {
     try {
-      const { default: axios } = await import("axios")
-      const base = import.meta.env.VITE_API_URL ?? "http://localhost:8000"
-      const res = await axios.get(`${base}/profiles/${citation.id}`)
-      onSelectProfile(res.data as Profile)
+      const profile = await getProfile(citation.id)
+      onSelectProfile(profile)
     } catch { /* silent */ }
   }
 

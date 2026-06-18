@@ -1,8 +1,22 @@
 import axios from "axios"
+import type { User } from "firebase/auth"
+import { getIdToken } from "@/firebase"
 
 const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000"
 
 const api = axios.create({ baseURL: BASE })
+
+// Inject Firebase ID token into every request
+api.interceptors.request.use(async (config) => {
+  const token = await getIdToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// Called by AuthContext when auth state changes — no-op needed (interceptor reads live)
+export function setupApiAuth(_user: User | null) {}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -130,6 +144,15 @@ export const chatQuery = (question: string, session_id?: string) =>
 export const clearChat = (session_id: string) =>
   api.delete(`/chat/${session_id}`)
 
+export const getProfile = (id: string) =>
+  api.get<Profile>(`/profiles/${id}`).then((r) => r.data)
+
+export const listCandidates = () =>
+  api.get<Profile[]>("/candidates").then((r) => r.data)
+
+export const deleteProfile = (id: string) =>
+  api.delete(`/profiles/${id}`)
+
 export function streamChat(
   question: string,
   sessionId: string | undefined,
@@ -140,9 +163,13 @@ export function streamChat(
   ;(async () => {
     let fullText = ""
     try {
+      const token = await getIdToken()
       const res = await fetch(`${BASE}/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ question, session_id: sessionId }),
         signal: controller.signal,
       })
@@ -170,8 +197,10 @@ export function streamChat(
           } catch { /* skip malformed lines */ }
         }
       }
-    } catch (e: any) {
-      if (e?.name !== "AbortError") callbacks.onError(e instanceof Error ? e : new Error(String(e)))
+    } catch (e: unknown) {
+      if ((e as { name?: string })?.name !== "AbortError") {
+        callbacks.onError(e instanceof Error ? e : new Error(String(e)))
+      }
     }
   })()
 
