@@ -31,7 +31,7 @@ const DialogContent = React.forwardRef<
       className={cn(
         "dialog-content fixed left-[50%] top-[50%] z-50 w-full max-w-2xl max-h-[85vh] overflow-y-auto",
         "translate-x-[-50%] translate-y-[-50%]",
-        "bg-white rounded-xl shadow-xl border border-gray-100",
+        "bg-white rounded-xl shadow-xl border border-gray-200",
         className
       )}
       {...props}

@@ -150,7 +150,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
   return (
     <div className="flex flex-col h-full bg-white">
       {/* Header */}
-      <div className="h-14 flex items-center justify-between px-5 border-b border-gray-100 flex-none">
+      <div className="h-14 flex items-center justify-between px-5 border-b border-gray-200 flex-none">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-purple-100 flex items-center justify-center">
             <Bot className="w-4 h-4 text-purple-600" />
@@ -187,7 +187,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
             <div className="w-7 h-7 rounded-lg bg-purple-100 flex items-center justify-center flex-none">
               <Bot className="w-3.5 h-3.5 text-purple-600" />
             </div>
-            <div className="bg-gray-50 rounded-2xl rounded-tl-sm border border-gray-100 px-4 py-3 text-sm text-gray-800 leading-relaxed max-w-[82%]">
+            <div className="bg-gray-50 rounded-2xl rounded-tl-sm border border-gray-200 px-4 py-3 text-sm text-gray-800 leading-relaxed max-w-[82%]">
               {streamingText ? (
                 <div className="chat-markdown">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
@@ -211,7 +211,7 @@ export function ChatPanel({ onSelectProfile }: ChatPanelProps) {
       </div>
 
       {/* Input */}
-      <div className="flex-none px-4 pb-4 pt-2 border-t border-gray-100">
+      <div className="flex-none px-4 pb-4 pt-2 border-t border-gray-200">
         <div className="flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 focus-within:shadow-[0_0_0_3px_rgba(124,58,237,0.12)] transition-all duration-150 px-4 py-3">
           <textarea
             ref={inputRef}
@@ -302,7 +302,7 @@ function ChatMessage({ message, onCitationClick }: {
           "group relative rounded-2xl px-4 py-3 text-sm leading-relaxed",
           isUser
             ? "bg-purple-700 text-white rounded-tr-sm"
-            : "bg-gray-50 text-gray-800 rounded-tl-sm border border-gray-100"
+            : "bg-gray-50 text-gray-800 rounded-tl-sm border border-gray-200"
         )}>
           {isUser ? message.content : (
             <div className="chat-markdown">

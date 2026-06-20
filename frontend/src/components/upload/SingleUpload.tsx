@@ -191,7 +191,7 @@ function Field({ label, icon, children }: { label: string; icon: React.ReactNode
 
 function ProfileResult({ result, onReset, onViewFull }: { result: IngestResponse; onReset: () => void; onViewFull: () => void }) {
   return (
-    <div className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
       {/* Header */}
       <div className="bg-purple-50 border-b border-purple-100 px-5 py-4 flex items-center gap-3">
         <CheckCircle className="w-5 h-5 text-purple-600 flex-none" />

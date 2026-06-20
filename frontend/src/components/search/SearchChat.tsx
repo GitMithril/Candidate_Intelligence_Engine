@@ -10,7 +10,7 @@ export function SearchChat() {
   return (
     <div className="flex flex-1 overflow-hidden h-full">
       {/* Left — search */}
-      <div className="w-[400px] flex-none border-r border-gray-100 flex flex-col overflow-hidden">
+      <div className="w-[400px] flex-none border-r border-gray-200 bg-white flex flex-col overflow-hidden">
         <SearchPanel onSelectProfile={setSelectedProfile} />
       </div>
 

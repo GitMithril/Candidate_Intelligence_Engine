@@ -43,7 +43,7 @@ export function SearchPanel({ onSelectProfile }: SearchPanelProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="p-4 border-b border-gray-100 space-y-2.5">
+      <div className="p-4 border-b border-gray-200 space-y-2.5">
         <div className="flex items-center gap-1 text-xs font-semibold text-gray-400 uppercase tracking-widest">
           <Search className="w-3 h-3" /> Semantic Search
         </div>
@@ -138,7 +138,7 @@ export function SearchPanel({ onSelectProfile }: SearchPanelProps) {
         )}
 
         {results.length > 0 && !loading && (
-          <div className="divide-y divide-gray-50">
+          <div className="divide-y divide-gray-100">
             {results.map(({ profile, score }) => (
               <CandidateCard
                 key={profile.id}

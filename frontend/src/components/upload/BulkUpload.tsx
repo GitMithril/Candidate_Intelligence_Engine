@@ -154,14 +154,14 @@ export function BulkUpload() {
 
             {/* File list */}
             {files.length > 0 && (
-              <div className="rounded-xl border border-gray-100 bg-white overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-gray-50">
+              <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 bg-gray-50">
                   <span className="text-xs font-medium text-gray-600">{files.length} file{files.length !== 1 ? "s" : ""} queued</span>
                   <button type="button" onClick={() => setFiles([])} className="text-xs text-gray-400 hover:text-red-500 transition-colors">
                     Clear all
                   </button>
                 </div>
-                <div className="max-h-36 overflow-y-auto divide-y divide-gray-50">
+                <div className="max-h-36 overflow-y-auto divide-y divide-gray-100">
                   {files.map((f, i) => (
                     <div key={i} className="flex items-center gap-2.5 px-4 py-2">
                       <FileText className="w-3.5 h-3.5 text-purple-400 flex-none" />
@@ -229,9 +229,9 @@ function JobProgress({
     : "text-gray-600"
 
   return (
-    <div className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
       {/* Header */}
-      <div className={cn("px-5 py-4 border-b border-gray-100 flex items-center gap-3",
+      <div className={cn("px-5 py-4 border-b border-gray-200 flex items-center gap-3",
         isDone ? "bg-purple-50" : "bg-gray-50")}>
         {isDone ? (
           <CheckCircle className="w-5 h-5 text-purple-600 flex-none" />

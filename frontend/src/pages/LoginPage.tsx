@@ -33,7 +33,7 @@ function friendlyError(code: string): string {
   return FIREBASE_ERRORS[code] ?? "Something went wrong. Please try again."
 }
 
-export function LoginPage() {
+export function LoginPage({ onBack }: { onBack?: () => void }) {
   const [mode, setMode] = useState<Mode>("signin")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -198,6 +198,18 @@ export function LoginPage() {
               {mode === "signin" ? "Sign up" : "Sign in"}
             </button>
           </p>
+
+          {onBack && (
+            <p className="text-center mt-3">
+              <button
+                type="button"
+                onClick={onBack}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                ← Back to home
+              </button>
+            </p>
+          )}
         </div>
       </div>
     </div>

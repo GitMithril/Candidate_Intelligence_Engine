@@ -58,7 +58,7 @@ export function CandidatesView() {
         {loading && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="rounded-xl border border-gray-100 bg-white p-4 animate-pulse">
+              <div key={i} className="rounded-xl border border-gray-200 bg-white p-4 animate-pulse">
                 <div className="flex items-center gap-3 mb-3">
                   <div className="w-10 h-10 rounded-xl bg-gray-100 flex-none" />
                   <div className="flex-1 space-y-1.5">
@@ -143,7 +143,7 @@ function CandidateCard({ profile, onView, onDeleted }: CardProps) {
   const initials = (profile.name ?? "?")[0].toUpperCase()
 
   return (
-    <div onClick={onView} className="group relative rounded-xl border border-gray-100 bg-white hover:border-purple-200 hover:shadow-sm transition-all duration-150 flex flex-col cursor-pointer">
+    <div onClick={onView} className="group relative rounded-xl border border-gray-200 bg-white hover:border-purple-200 hover:shadow-sm transition-all duration-150 flex flex-col cursor-pointer">
       {/* Card body */}
       <div className="p-4 flex-1">
         {/* Top row: avatar + delete */}
