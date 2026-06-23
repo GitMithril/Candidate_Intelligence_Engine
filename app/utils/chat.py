@@ -1,9 +1,10 @@
 import json
-import os
 import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+from .openrouter import get_next_openrouter_api_key
 
 _SYSTEM_PROMPT = """You are a recruitment assistant for a Candidate Intelligence System.
 Help recruiters evaluate and compare candidates by answering questions grounded strictly in the profiles below.
@@ -46,7 +47,7 @@ Examples:
 def get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
+        api_key=get_next_openrouter_api_key(),
         model="google/gemma-4-31b-it:free",
         temperature=0.2,
     )
@@ -63,7 +64,7 @@ def classify_query(question: str) -> dict:
     """
     llm = ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
+        api_key=get_next_openrouter_api_key(),
         model="google/gemma-4-31b-it:free",
         temperature=0,
     )

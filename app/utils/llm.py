@@ -1,11 +1,11 @@
 import json
-import os
 import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from ..schemas import ResumeExtraction
+from .openrouter import get_next_openrouter_api_key
 
 _SYSTEM_PROMPT = """Extract information from the resume below and output ONLY a valid JSON object.
 
@@ -40,7 +40,7 @@ _MAX_CHARS = 15000
 def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
+        api_key=get_next_openrouter_api_key(),
         model="google/gemma-4-31b-it:free",
         temperature=0,
     )
