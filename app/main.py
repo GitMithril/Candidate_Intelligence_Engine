@@ -157,8 +157,8 @@ def scrape_linkedin(profile_url: str) -> LinkedInProfile:
 
     response = requests.post(
         f"{service_url.rstrip('/')}/scrape",
-        json={"linkedin_url": profile_url},
-        timeout=120,
+        json={"profile_url": profile_url, "li_at": None},
+        timeout=180,
     )
     response.raise_for_status()
     return LinkedInProfile.model_validate(response.json())
