@@ -1,4 +1,4 @@
-import { Upload, Users, MessageSquare, Zap, LayoutGrid, LogOut } from "lucide-react"
+import { Upload, Users, MessageSquare, LayoutGrid, LogOut } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/contexts/AuthContext"
 
@@ -33,12 +33,9 @@ export function Layout({ view, onView, onSignOut, children }: LayoutProps) {
       {/* Sidebar — dark */}
       <aside className="w-56 flex-none flex flex-col border-r border-zinc-700 bg-zinc-900">
         {/* Brand */}
-        <div className="h-14 flex items-center gap-2.5 px-5 border-b border-gray-800">
-          <div className="w-7 h-7 rounded-lg bg-purple-700 flex items-center justify-center flex-none shadow-lg shadow-purple-900/50">
-            <Zap className="w-3.5 h-3.5 text-white" />
-          </div>
+        <div className="h-14 flex items-center px-5 border-b border-gray-800">
           <div className="text-[11px] font-semibold text-white leading-none tracking-tight">
-            Candidate Intelligence
+            Candidate Lens
           </div>
         </div>
 

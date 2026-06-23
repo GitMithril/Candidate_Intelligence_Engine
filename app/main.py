@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import requests
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ from pymongo import MongoClient, ReturnDocument
 from .auth import get_current_user
 from .embeddings import delete_vector, embed_and_store, embed_profile_by_id, embed_text, query_similar
 from .scrapers.github import scrape_github
-from .scrapers.linkedin import scrape_linkedin
+# from .scrapers.linkedin import scrape_linkedin
 from .schemas import (
     BulkIngestResponse,
     BulkJobStatus,
@@ -146,6 +147,21 @@ def _redis() -> Optional[_RedisAdapter]:
 
 _job_store: dict[str, dict] = {}
 _chat_store: dict[str, list] = {}
+
+
+def scrape_linkedin(profile_url: str) -> LinkedInProfile:
+    """Scrape a LinkedIn profile through the deployed scraper service."""
+    service_url = os.environ.get("LINKEDIN_SCRAPER")
+    if not service_url:
+        raise RuntimeError("LINKEDIN_SCRAPER is not configured")
+
+    response = requests.post(
+        f"{service_url.rstrip('/')}/scrape",
+        json={"linkedin_url": profile_url},
+        timeout=120,
+    )
+    response.raise_for_status()
+    return LinkedInProfile.model_validate(response.json())
 
 
 def _save_job(job_id: str, state: dict) -> None:
