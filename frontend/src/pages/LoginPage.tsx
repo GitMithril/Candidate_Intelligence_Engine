@@ -33,8 +33,18 @@ function friendlyError(code: string): string {
   return FIREBASE_ERRORS[code] ?? "Something went wrong. Please try again."
 }
 
-export function LoginPage({ onBack }: { onBack?: () => void }) {
-  const [mode, setMode] = useState<Mode>("signin")
+interface LoginPageProps {
+  initialMode?: Mode
+  onBack?: () => void
+  onAuthenticated?: () => void
+}
+
+export function LoginPage({
+  initialMode = "signin",
+  onBack,
+  onAuthenticated,
+}: LoginPageProps) {
+  const [mode, setMode] = useState<Mode>(initialMode)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
@@ -53,6 +63,7 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
       } else {
         await signUpWithEmail(email, password)
       }
+      onAuthenticated?.()
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? ""
       const msg = friendlyError(code)
@@ -67,6 +78,7 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
     setGoogleLoading(true)
     try {
       await signInWithGoogle()
+      onAuthenticated?.()
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? ""
       const msg = friendlyError(code)
@@ -77,31 +89,28 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-white flex flex-col items-center justify-center px-4">
-
-      {/* Card with glow */}
+    <div
+      className="relative w-full max-w-lg"
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false)
+      }}
+    >
+      {/* Glow backdrop */}
       <div
-        className="relative w-full max-w-sm"
-        onFocusCapture={() => setFocused(true)}
-        onBlurCapture={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocused(false)
-        }}
-      >
-        {/* Glow backdrop */}
-        <div
-          className={cn(
-            "absolute -inset-6 rounded-3xl bg-purple-600/15 blur-2xl transition-opacity duration-500 pointer-events-none",
-            focused ? "opacity-100" : "opacity-0"
-          )}
-        />
+        className={cn(
+          "absolute -inset-8 rounded-[2rem] bg-purple-500/25 blur-3xl transition-opacity duration-500 pointer-events-none",
+          focused ? "opacity-100" : "opacity-50"
+        )}
+      />
 
-        {/* Card */}
-        <div className="relative bg-white border border-gray-100 rounded-2xl shadow-md px-8 py-8">
+      {/* Card */}
+      <div className="relative rounded-3xl border border-white/15 bg-zinc-950/55 px-8 py-9 shadow-2xl shadow-black/30 backdrop-blur-2xl sm:px-10">
           <div className="mb-6">
-            <h1 className="text-xl font-semibold text-gray-900">
+            <h1 className="text-2xl font-semibold text-white">
               {mode === "signin" ? "Welcome back" : "Create account"}
             </h1>
-            <p className="text-sm text-gray-500 mt-1">
+            <p className="text-sm text-white/60 mt-1.5">
               {mode === "signin"
                 ? "Sign in to access your candidate database."
                 : "Sign up to start building your talent pool."}
@@ -113,10 +122,10 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
             type="button"
             onClick={handleGoogle}
             disabled={googleLoading || loading}
-            className="w-full flex items-center justify-center gap-2.5 border border-gray-200 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-all duration-100 disabled:opacity-50 disabled:cursor-not-allowed mb-5"
+            className="w-full flex items-center justify-center gap-2.5 border border-white/15 bg-white/10 rounded-xl px-4 py-3 text-sm font-medium text-white hover:bg-white/15 hover:border-white/25 transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed mb-5"
           >
             {googleLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-white/60" />
             ) : (
               <GoogleIcon />
             )}
@@ -124,16 +133,16 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
           </button>
 
           <div className="relative flex items-center gap-3 mb-5">
-            <div className="flex-1 h-px bg-gray-100" />
-            <span className="text-xs text-gray-400">or</span>
-            <div className="flex-1 h-px bg-gray-100" />
+            <div className="flex-1 h-px bg-white/10" />
+            <span className="text-xs text-white/40">or</span>
+            <div className="flex-1 h-px bg-white/10" />
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email */}
             <div>
-              <label className="flex items-center gap-1.5 text-sm font-medium text-gray-700 mb-1.5">
-                <Mail className="w-3.5 h-3.5 text-gray-400" /> Email
+              <label className="flex items-center gap-1.5 text-sm font-medium text-white/80 mb-1.5">
+                <Mail className="w-3.5 h-3.5 text-white/45" /> Email
               </label>
               <Input
                 type="email"
@@ -142,13 +151,14 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
                 placeholder="you@example.com"
                 autoComplete="email"
                 required
+                className="h-11 border-white/15 bg-black/25 text-white placeholder:text-white/35 focus:border-purple-400 focus:ring-purple-500/20"
               />
             </div>
 
             {/* Password */}
             <div>
-              <label className="flex items-center gap-1.5 text-sm font-medium text-gray-700 mb-1.5">
-                <Lock className="w-3.5 h-3.5 text-gray-400" /> Password
+              <label className="flex items-center gap-1.5 text-sm font-medium text-white/80 mb-1.5">
+                <Lock className="w-3.5 h-3.5 text-white/45" /> Password
               </label>
               <div className="relative">
                 <Input
@@ -158,12 +168,12 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
                   placeholder="••••••••"
                   autoComplete={mode === "signup" ? "new-password" : "current-password"}
                   required
-                  className="pr-10"
+                  className="h-11 border-white/15 bg-black/25 pr-10 text-white placeholder:text-white/35 focus:border-purple-400 focus:ring-purple-500/20"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
                   tabIndex={-1}
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -172,13 +182,18 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
             </div>
 
             {error && (
-              <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-100 px-3 py-2.5 text-sm text-red-600">
+              <div className="flex items-start gap-2 rounded-lg bg-red-500/10 border border-red-400/20 px-3 py-2.5 text-sm text-red-200">
                 <AlertCircle className="w-4 h-4 mt-0.5 flex-none" />
                 {error}
               </div>
             )}
 
-            <Button type="submit" disabled={loading || googleLoading} className="w-full" size="lg">
+            <Button
+              type="submit"
+              disabled={loading || googleLoading}
+              className="w-full rounded-xl bg-purple-600 hover:bg-purple-500"
+              size="lg"
+            >
               {loading ? (
                 <><Loader2 className="w-4 h-4 animate-spin" /> {mode === "signin" ? "Signing in…" : "Creating account…"}</>
               ) : (
@@ -188,12 +203,12 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
           </form>
 
           {/* Toggle */}
-          <p className="text-center text-sm text-gray-500 mt-5">
+          <p className="text-center text-sm text-white/55 mt-5">
             {mode === "signin" ? "Don't have an account?" : "Already have an account?"}{" "}
             <button
               type="button"
               onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(null) }}
-              className="text-purple-600 font-medium hover:text-purple-700 transition-colors"
+              className="text-purple-300 font-medium hover:text-purple-200 transition-colors"
             >
               {mode === "signin" ? "Sign up" : "Sign in"}
             </button>
@@ -204,13 +219,12 @@ export function LoginPage({ onBack }: { onBack?: () => void }) {
               <button
                 type="button"
                 onClick={onBack}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                className="text-xs text-white/45 hover:text-white/70 transition-colors"
               >
                 ← Back to home
               </button>
             </p>
           )}
-        </div>
       </div>
     </div>
   )

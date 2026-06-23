@@ -21,16 +21,17 @@ const NAV: NavItem[] = [
 interface LayoutProps {
   view: View
   onView: (v: View) => void
+  onSignOut: () => Promise<void>
   children: React.ReactNode
 }
 
-export function Layout({ view, onView, children }: LayoutProps) {
-  const { user, signOut } = useAuth()
+export function Layout({ view, onView, onSignOut, children }: LayoutProps) {
+  const { user } = useAuth()
 
   return (
     <div className="flex h-screen overflow-hidden bg-gray-50">
       {/* Sidebar — dark */}
-      <aside className="w-56 flex-none flex flex-col border-r border-gray-800 bg-zinc-950">
+      <aside className="w-56 flex-none flex flex-col border-r border-zinc-700 bg-zinc-900">
         {/* Brand */}
         <div className="h-14 flex items-center gap-2.5 px-5 border-b border-gray-800">
           <div className="w-7 h-7 rounded-lg bg-purple-700 flex items-center justify-center flex-none shadow-lg shadow-purple-900/50">
@@ -92,7 +93,7 @@ export function Layout({ view, onView, children }: LayoutProps) {
             </div>
           )}
           <button
-            onClick={signOut}
+            onClick={onSignOut}
             className="w-full flex items-center gap-2 px-2 py-2 rounded-lg text-sm text-gray-500 hover:bg-red-950/30 hover:text-red-400 transition-colors group"
           >
             <LogOut className="w-3.5 h-3.5 text-gray-600 group-hover:text-red-400 transition-colors" />

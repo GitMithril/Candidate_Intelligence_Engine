@@ -5,13 +5,13 @@ import { SingleUpload } from "@/components/upload/SingleUpload"
 import { BulkUpload } from "@/components/upload/BulkUpload"
 import { SearchChat } from "@/components/search/SearchChat"
 import { CandidatesView } from "@/components/candidates/CandidatesView"
-import { LoginPage } from "@/pages/LoginPage"
 import { LandingPage } from "@/pages/LandingPage"
 
 function AppContent() {
-  const { user, loading } = useAuth()
+  const { user, loading, signOut } = useAuth()
   const [view, setView] = useState<View>("search")
-  const [showLogin, setShowLogin] = useState(false)
+  const [screen, setScreen] = useState<"landing" | "login" | "dashboard">("landing")
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin")
 
   if (loading) {
     return (
@@ -28,11 +28,34 @@ function AppContent() {
     )
   }
 
-  if (!user && showLogin) return <LoginPage onBack={() => setShowLogin(false)} />
-  if (!user) return <LandingPage onGetStarted={() => setShowLogin(true)} />
+  if (screen !== "dashboard" || !user) {
+    return (
+      <LandingPage
+        isAuthenticated={Boolean(user)}
+        showLogin={screen === "login"}
+        authMode={authMode}
+        onSignIn={() => {
+          setAuthMode("signin")
+          setScreen(user ? "dashboard" : "login")
+        }}
+        onGetStarted={() => {
+          setAuthMode("signup")
+          setScreen(user ? "dashboard" : "login")
+        }}
+        onBack={() => setScreen("landing")}
+        onAuthenticated={() => setScreen("dashboard")}
+      />
+    )
+  }
+
+  const handleSignOut = async () => {
+    await signOut()
+    setView("search")
+    setScreen("landing")
+  }
 
   return (
-    <Layout view={view} onView={setView}>
+    <Layout view={view} onView={setView} onSignOut={handleSignOut}>
       {view === "upload" && <SingleUpload />}
       {view === "bulk" && <BulkUpload />}
       {view === "search" && <SearchChat />}
