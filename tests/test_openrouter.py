@@ -24,23 +24,38 @@ class OpenRouterApiKeyRotationTests(unittest.TestCase):
 
         self.assertEqual(keys, ["key-1", "key-2", "key-3", "key-1"])
 
-    def test_missing_key_does_not_advance_rotation(self):
+    def test_rotates_only_configured_keys(self):
         environment = {
             "OPENROUTER_API_KEY_v1": "key-1",
             "OPENROUTER_API_KEY_v3": "key-3",
         }
 
         with patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(openrouter.get_next_openrouter_api_key(), "key-1")
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "OPENROUTER_API_KEY_v2 is not configured",
-            ):
+            keys = [
                 openrouter.get_next_openrouter_api_key()
+                for _ in range(4)
+            ]
 
+        self.assertEqual(keys, ["key-1", "key-3", "key-1", "key-3"])
+
+    def test_reuses_single_configured_key(self):
+        environment = {
+            "OPENROUTER_API_KEY_v1": "key-1",
+        }
+
+        with patch.dict(os.environ, environment, clear=True):
+            keys = [
+                openrouter.get_next_openrouter_api_key()
+                for _ in range(3)
+            ]
+
+        self.assertEqual(keys, ["key-1", "key-1", "key-1"])
+
+    def test_raises_when_no_keys_are_configured(self):
+        with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "OPENROUTER_API_KEY_v2 is not configured",
+                "No OpenRouter API key configured",
             ):
                 openrouter.get_next_openrouter_api_key()
 
